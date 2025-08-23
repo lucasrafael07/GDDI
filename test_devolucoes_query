@@ -1,0 +1,172 @@
+# -*- coding: utf-8 -*-
+"""
+Script para testar isoladamente a query de devoluções
+Execute para identificar problemas específicos na estrutura do banco
+"""
+
+from aurora_iqvia.db import AppConfig, connect_oracle
+from datetime import date, timedelta
+
+def test_devolucoes_query():
+    """Testa apenas a query de devoluções para identificar problemas"""
+    
+    print("🔍 TESTE ISOLADO - QUERY DE DEVOLUÇÕES")
+    print("=" * 50)
+    
+    cfg = AppConfig.load()
+    dia_teste = date.today() - timedelta(days=1)
+    
+    print(f"📅 Testando dia: {dia_teste.strftime('%d/%m/%Y')}")
+    print(f"🏢 Filial: {cfg.codfilial}")
+    
+    # Query simplificada para teste
+    query_teste = """
+    SELECT COUNT(*) as TOTAL_REGISTROS
+    FROM PRISMA.PCNFENT
+    WHERE NVL(PCNFENT.CODFILIALNF, PCNFENT.CODFILIAL) = :CODFILIAL
+      AND PCNFENT.TIPODESCARGA IN ('6', '7', 'T')
+      AND NVL(PCNFENT.OBS, 'X') <> 'NF CANCELADA'
+      AND PCNFENT.CODFISCAL IN ('131', '132', '231', '232', '199', '299')
+      AND TRUNC(PCNFENT.DTENT) = :DIA
+    """
+    
+    try:
+        print("🔌 Conectando ao Oracle...")
+        conn = connect_oracle(cfg)
+        print(f"✅ Conectado: {conn.version}")
+        
+        # Teste 1: Verificar se existem registros básicos
+        print("\n1️⃣ TESTE: Registros básicos em PCNFENT")
+        cur = conn.cursor()
+        cur.execute(query_teste, {'DIA': dia_teste, 'CODFILIAL': cfg.codfilial})
+        resultado = cur.fetchone()
+        print(f"   📊 Total de registros PCNFENT: {resultado[0]}")
+        
+        if resultado[0] == 0:
+            print("   ⚠️ Nenhuma devolução encontrada para o dia testado")
+            print("   💡 Tentando últimos 7 dias...")
+            
+            for i in range(1, 8):
+                dia_anterior = dia_teste - timedelta(days=i)
+                cur.execute(query_teste, {'DIA': dia_anterior, 'CODFILIAL': cfg.codfilial})
+                resultado_anterior = cur.fetchone()
+                if resultado_anterior[0] > 0:
+                    print(f"   📅 {dia_anterior.strftime('%d/%m/%Y')}: {resultado_anterior[0]} devoluções")
+                    dia_teste = dia_anterior  # Usar este dia para testes seguintes
+                    break
+        
+        # Teste 2: Verificar estrutura das tabelas relacionadas
+        print("\n2️⃣ TESTE: Estrutura das tabelas")
+        
+        # Verificar se PCESTCOM existe
+        try:
+            cur.execute("SELECT COUNT(*) FROM PRISMA.PCESTCOM WHERE ROWNUM = 1")
+            print("   ✅ PCESTCOM: OK")
+        except Exception as e:
+            print(f"   ❌ PCESTCOM: {e}")
+        
+        # Verificar se existe campo CODDEVOL
+        try:
+            cur.execute("SELECT CODDEVOL FROM PRISMA.PCNFENT WHERE ROWNUM = 1")
+            print("   ✅ PCNFENT.CODDEVOL: OK")
+        except Exception as e:
+            print(f"   ❌ PCNFENT.CODDEVOL: {e}")
+            print("   💡 Campo CODDEVOL não existe - query será ajustada")
+        
+        # Verificar se PCTABDEV existe
+        try:
+            cur.execute("SELECT COUNT(*) FROM PRISMA.PCTABDEV WHERE ROWNUM = 1")
+            print("   ✅ PCTABDEV: OK")
+        except Exception as e:
+            print(f"   ❌ PCTABDEV: {e}")
+            print("   💡 Tabela PCTABDEV não existe - será ignorada")
+        
+        # Teste 3: Query simplificada sem JOINs problemáticos
+        print("\n3️⃣ TESTE: Query simplificada")
+        
+        query_simples = """
+        SELECT PCNFENT.CODFILIAL,
+               PCNFENT.NUMNOTA,
+               PCNFENT.DTENT,
+               PCNFENT.CODFORNEC
+        FROM PRISMA.PCNFENT
+        WHERE NVL(PCNFENT.CODFILIALNF, PCNFENT.CODFILIAL) = :CODFILIAL
+          AND PCNFENT.TIPODESCARGA IN ('6', '7', 'T')
+          AND NVL(PCNFENT.OBS, 'X') <> 'NF CANCELADA'
+          AND PCNFENT.CODFISCAL IN ('131', '132', '231', '232', '199', '299')
+          AND TRUNC(PCNFENT.DTENT) = :DIA
+          AND ROWNUM <= 5
+        """
+        
+        cur.execute(query_simples, {'DIA': dia_teste, 'CODFILIAL': cfg.codfilial})
+        rows = cur.fetchall()
+        
+        if rows:
+            print(f"   ✅ Query simples funcionou: {len(rows)} registros")
+            for row in rows:
+                print(f"      - Filial: {row[0]}, Nota: {row[1]}, Data: {row[2]}")
+        else:
+            print("   ⚠️ Query simples não retornou dados")
+        
+        # Teste 4: Sugerir query corrigida
+        print("\n4️⃣ SUGESTÃO: Query corrigida")
+        
+        query_corrigida = """
+        SELECT DISTINCT
+               PCNFENT.CODFILIAL,
+               COALESCE(PCCLIENT.CLIENTE, 'CLIENTE NAO IDENTIFICADO') AS CLIENTE,
+               COALESCE(PCCLIENT.CODCLI, 0) AS CODCLI,
+               COALESCE(PCCLIENT.CGCENT, '') AS CGCENT,
+               PCMOV.CODPROD,
+               PCPRODUT.CODAUXILIAR,
+               PCPRODUT.DESCRICAO,
+               PCMOV.QT,
+               PCNFENT.NUMNOTA,
+               PCNFENT.DTENT AS DTSAIDA
+        FROM PRISMA.PCNFENT
+        INNER JOIN PRISMA.PCESTCOM ON PCESTCOM.NUMTRANSENT = PCNFENT.NUMTRANSENT
+        INNER JOIN PRISMA.PCMOV ON PCESTCOM.NUMTRANSENT = PCMOV.NUMTRANSENT
+        INNER JOIN PRISMA.PCPRODUT ON PCMOV.CODPROD = PCPRODUT.CODPROD
+        LEFT JOIN PRISMA.PCCLIENT ON PCNFENT.CODFORNEC = PCCLIENT.CODCLI
+        WHERE NVL(PCNFENT.CODFILIALNF, PCNFENT.CODFILIAL) = :CODFILIAL
+          AND PCNFENT.TIPODESCARGA IN ('6', '7', 'T')
+          AND NVL(PCNFENT.OBS, 'X') <> 'NF CANCELADA'
+          AND PCNFENT.CODFISCAL IN ('131', '132', '231', '232', '199', '299')
+          AND PCMOV.DTCANCEL IS NULL
+          AND PCPRODUT.CODAUXILIAR IS NOT NULL
+          AND PCPRODUT.CODEPTO <> 196
+          AND TRUNC(PCNFENT.DTENT) = :DIA
+          AND ROWNUM <= 10
+        """
+        
+        try:
+            cur.execute(query_corrigida, {'DIA': dia_teste, 'CODFILIAL': cfg.codfilial})
+            rows_corrigida = cur.fetchall()
+            
+            if rows_corrigida:
+                print(f"   ✅ Query corrigida funcionou: {len(rows_corrigida)} registros")
+                print("   📝 Estrutura encontrada:")
+                for i, row in enumerate(rows_corrigida[:3]):
+                    print(f"      {i+1}. Filial: {row[0]}, Cliente: {row[1]}, Produto: {row[4]}, Qty: {row[7]}")
+            else:
+                print("   ⚠️ Query corrigida não retornou dados")
+                
+        except Exception as e:
+            print(f"   ❌ Erro na query corrigida: {e}")
+        
+        print("\n✅ TESTE CONCLUÍDO")
+        
+    except Exception as e:
+        print(f"❌ ERRO: {e}")
+        return False
+    finally:
+        try:
+            conn.close()
+            print("🔌 Conexão fechada")
+        except:
+            pass
+    
+    return True
+
+if __name__ == "__main__":
+    test_devolucoes_query()

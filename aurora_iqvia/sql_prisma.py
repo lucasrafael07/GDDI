@@ -1,0 +1,461 @@
+# -*- coding: utf-8 -*-
+"""
+SQLs parametrizados para integração WinThor x IQVIA
+Schema: PRISMA
+Versão: 3.0 - Corrigida e formatada conforme estrutura real do banco
+"""
+
+# =====================================================================================
+# QUERY PRINCIPAL DE VENDAS
+# Captura todas as vendas do dia com tratamento correto de preços
+# =====================================================================================
+SQL_MOV = """
+SELECT 
+    -- Dados da Filial
+    F.CODIGO AS CODFILIAL,
+    F.RAZAOSOCIAL,
+    F.CGC,
+    F.FANTASIA AS FANTASIA_FILIAL,
+    F.ENDERECO || ',' || NVL(F.NUMERO, '0') AS ENDERECOFILIAL,
+    F.CEP, 
+    F.CIDADE, 
+    F.UF, 
+    F.TELEFONE,
+    
+    -- Dados do Cliente
+    C.CODCLI, 
+    C.CLIENTE, 
+    C.CGCENT,
+    NVL(C.FANTASIA, C.CLIENTE) AS FANTASIA_CLIENT,
+    C.ENDERENT || ',' || NVL(C.NUMEROENT, '0') AS ENDERECOCLI,
+    C.CEPENT, 
+    C.MUNICENT, 
+    C.ESTENT, 
+    C.TELENT,
+    
+    -- Dados do Produto
+    M.CODPROD, 
+    P.CODAUXILIAR, 
+    P.NBM, 
+    P.DESCRICAO,
+    FORN.CODFORNEC, 
+    FORN.FORNECEDOR,
+    
+    -- Tratamento de Preços (Hierarquia: PTABELA mov -> PVENDA produto)
+    CASE 
+        WHEN NVL(M.PTABELA, 0) = 0 THEN NVL(P.PVENDA, 0) 
+        ELSE NVL(M.PTABELA, 0) 
+    END AS PTABELA,
+    
+    CASE 
+        WHEN NVL(M.PUNIT, 0) = 0 THEN NVL(M.PTABELA, 0) 
+        ELSE NVL(M.PUNIT, 0) 
+    END AS PUNIT,
+    
+    -- Dados da Movimentação
+    M.QT, 
+    M.PERCICM, 
+    MC.VLICMS, 
+    M.SITTRIBUT,
+    
+    -- Dados da Nota Fiscal
+    N.NUMNOTA, 
+    N.SERIE, 
+    N.VLTOTAL, 
+    N.CHAVENFE, 
+    N.DTSAIDA,
+    
+    -- Controle de Tipo
+    'VENDA' AS TIPO_OPERACAO,
+    CASE 
+        WHEN NVL(M.PUNIT, 0) = 0 THEN 'S' 
+        ELSE 'N' 
+    END AS BRINDE
+
+FROM PRISMA.PCNFSAID N
+INNER JOIN PRISMA.PCMOV M ON N.NUMTRANSVENDA = M.NUMTRANSVENDA
+INNER JOIN PRISMA.PCFILIAL F ON N.CODFILIAL = F.CODIGO
+INNER JOIN PRISMA.PCCLIENT C ON N.CODCLI = C.CODCLI
+INNER JOIN PRISMA.PCUSUARI U ON N.CODUSUR = U.CODUSUR
+INNER JOIN PRISMA.PCPRODUT P ON M.CODPROD = P.CODPROD
+INNER JOIN PRISMA.PCFORNEC FORN ON P.CODFORNEC = FORN.CODFORNEC
+INNER JOIN PRISMA.PCMOVCOMPLE MC ON M.NUMTRANSITEM = MC.NUMTRANSITEM
+
+WHERE 1=1
+    AND NVL(M.QT, 0) > 0                                                    -- Quantidade positiva
+    AND P.CODAUXILIAR IS NOT NULL                                           -- Produto com EAN
+    AND P.CODEPTO <> 196                                                    -- Excluir departamento 196
+    AND TRUNC(N.DTSAIDA) = :DIA                                            -- Filtro por dia
+    AND N.CODFILIAL = :CODFILIAL                                           -- Filtro por filial
+    AND REPLACE(REPLACE(REPLACE(C.CGCENT,'.',''),'/',''),'-','') <> '06112992000125' -- Excluir CNPJ específico
+
+ORDER BY N.DTSAIDA, N.NUMNOTA
+"""
+
+# =====================================================================================
+# QUERY DE DEVOLUÇÕES
+# Captura todas as devoluções do dia baseada na estrutura validada
+# =====================================================================================
+SQL_DEVOLUCOES = """
+SELECT DISTINCT
+    -- Dados da Filial
+    PCNFENT.CODFILIAL,
+    
+    -- Dados do Cliente (com fallback para não identificados)
+    COALESCE(PCCLIENT.CLIENTE, 'CLIENTE NAO IDENTIFICADO') AS CLIENTE,
+    COALESCE(PCCLIENT.CODCLI, 0) AS CODCLI,
+    COALESCE(PCCLIENT.CGCENT, '') AS CGCENT,
+    COALESCE(PCCLIENT.FANTASIA, PCCLIENT.CLIENTE) AS FANTASIA_CLIENT,
+    PCCLIENT.ENDERENT || ',' || NVL(PCCLIENT.NUMEROENT, '0') AS ENDERECOCLI,
+    PCCLIENT.CEPENT, 
+    PCCLIENT.MUNICENT, 
+    PCCLIENT.ESTENT, 
+    PCCLIENT.TELENT,
+    
+    -- Dados do Produto
+    PCMOV.CODPROD,
+    PCPRODUT.CODAUXILIAR,
+    PCPRODUT.NBM,
+    PCPRODUT.DESCRICAO,
+    PCFORNEC.CODFORNEC,
+    PCFORNEC.FORNECEDOR,
+    
+    -- Tratamento de Preços (mesma lógica das vendas)
+    CASE 
+        WHEN NVL(PCMOV.PTABELA, 0) = 0 THEN NVL(PCPRODUT.PVENDA, 0) 
+        ELSE NVL(PCMOV.PTABELA, 0) 
+    END AS PTABELA,
+    
+    CASE 
+        WHEN NVL(PCMOV.PUNIT, 0) = 0 THEN NVL(PCMOV.PTABELA, 0) 
+        ELSE NVL(PCMOV.PUNIT, 0) 
+    END AS PUNIT,
+    
+    -- Dados da Movimentação
+    PCMOV.QT,
+    PCMOV.PERCICM,
+    PCMOVCOMPLE.VLICMS,
+    PCMOV.SITTRIBUT,
+    
+    -- Dados da Nota Fiscal
+    PCNFENT.NUMNOTA,
+    PCNFENT.SERIE,
+    PCNFENT.VLTOTAL,
+    PCNFENT.CHAVENFE,
+    PCNFENT.DTENT AS DTSAIDA,
+    
+    -- Controle de Tipo
+    'DEVOLUCAO' AS TIPO_OPERACAO,
+    'N' AS BRINDE,
+    COALESCE(PCTABDEV.MOTIVO, 'DEVOLUCAO') AS MOTIVO_DEVOLUCAO
+
+FROM PRISMA.PCNFENT
+INNER JOIN PRISMA.PCESTCOM ON PCESTCOM.NUMTRANSENT = PCNFENT.NUMTRANSENT
+INNER JOIN PRISMA.PCMOV ON PCESTCOM.NUMTRANSENT = PCMOV.NUMTRANSENT
+INNER JOIN PRISMA.PCPRODUT ON PCMOV.CODPROD = PCPRODUT.CODPROD
+INNER JOIN PRISMA.PCFORNEC ON PCPRODUT.CODFORNEC = PCFORNEC.CODFORNEC
+INNER JOIN PRISMA.PCMOVCOMPLE ON PCMOV.NUMTRANSITEM = PCMOVCOMPLE.NUMTRANSITEM
+LEFT JOIN PRISMA.PCCLIENT ON PCNFENT.CODFORNEC = PCCLIENT.CODCLI
+LEFT JOIN PRISMA.PCTABDEV ON PCNFENT.CODDEVOL = PCTABDEV.CODDEVOL
+LEFT JOIN PRISMA.PCDEVCONSUM ON PCNFENT.NUMTRANSENT = PCDEVCONSUM.NUMTRANSENT
+LEFT JOIN PRISMA.PCNFSAID ON PCESTCOM.NUMTRANSVENDA = PCNFSAID.NUMTRANSVENDA
+
+WHERE 1=1
+    AND NVL(PCNFENT.CODFILIALNF, PCNFENT.CODFILIAL) = :CODFILIAL          -- Filtro por filial
+    AND PCNFENT.TIPODESCARGA IN ('6', '7', 'T')                           -- Tipos de devolução
+    AND NVL(PCNFENT.OBS, 'X') <> 'NF CANCELADA'                          -- Excluir canceladas
+    AND PCNFENT.CODFISCAL IN ('131', '132', '231', '232', '199', '299')   -- Códigos fiscais válidos
+    AND PCMOV.DTCANCEL IS NULL                                             -- Movimento não cancelado
+    AND PCPRODUT.CODAUXILIAR IS NOT NULL                                   -- Produto com EAN
+    AND PCPRODUT.CODEPTO <> 196                                           -- Excluir departamento 196
+    AND NVL(PCNFSAID.CONDVENDA, 0) NOT IN (4, 8, 10, 13, 20, 98, 99)     -- Condições de venda válidas
+    AND TRUNC(PCNFENT.DTENT) = :DIA                                       -- Filtro por dia
+
+ORDER BY PCNFENT.DTENT, PCNFENT.NUMNOTA
+"""
+
+# =====================================================================================
+# QUERY DE ESTOQUE - Versão simplificada para Oracle 10g
+# =====================================================================================
+SQL_ESTOQUE = """
+SELECT 
+    -- Identificação
+    E.CODFILIAL,
+    P.CODPROD,
+    
+    -- Dados do Produto
+    P.CODAUXILIAR,
+    P.NBM,
+    P.DESCRICAO,
+    FORN.CODFORNEC,
+    FORN.FORNECEDOR,
+    
+    -- Preço (usa preço de venda do produto)
+    NVL(P.PVENDA, 0) AS PTABELA,
+    
+    -- Data e Estoque
+    TRUNC(:DIA) AS DT,
+    TRUNC(PRISMA.PKG_ESTOQUE.ESTOQUE_DISPONIVEL(P.CODPROD, E.CODFILIAL, 'VA', :DIA)) AS ESTOQUEATUAL
+
+FROM PRISMA.PCEST E
+INNER JOIN PRISMA.PCPRODUT P ON P.CODPROD = E.CODPROD
+INNER JOIN PRISMA.PCFORNEC FORN ON P.CODFORNEC = FORN.CODFORNEC
+
+WHERE 1=1
+    AND E.CODFILIAL = :CODFILIAL                                                                    -- Filtro por filial
+    AND P.CODEPTO <> 196                                                                           -- Excluir departamento 196
+    AND TRUNC(PRISMA.PKG_ESTOQUE.ESTOQUE_DISPONIVEL(P.CODPROD, E.CODFILIAL, 'VA', :DIA)) > 0     -- Estoque positivo
+
+ORDER BY P.CODPROD
+"""
+
+# =====================================================================================
+# QUERY AUXILIAR - EAN e Preços das Notas de Entrada
+# Para completar dados faltantes dos produtos de estoque
+# =====================================================================================
+SQL_ENTRADA_PRODUTOS = """
+SELECT 
+    M.CODPROD,
+    P.CODAUXILIAR,
+    M.PUNIT,
+    N.DTENT,
+    ROW_NUMBER() OVER (PARTITION BY M.CODPROD ORDER BY N.DTENT DESC) AS RN
+FROM PRISMA.PCNFENT N
+INNER JOIN PRISMA.PCESTCOM EC ON EC.NUMTRANSENT = N.NUMTRANSENT  
+INNER JOIN PRISMA.PCMOV M ON EC.NUMTRANSENT = M.NUMTRANSENT
+INNER JOIN PRISMA.PCPRODUT P ON M.CODPROD = P.CODPROD
+WHERE 1=1
+    AND N.CODFILIAL = :CODFILIAL
+    AND (P.CODAUXILIAR IS NOT NULL OR NVL(M.PUNIT, 0) > 0)
+    AND N.DTENT >= TRUNC(:DIA) - 365  -- Últimos 12 meses
+ORDER BY M.CODPROD, N.DTENT DESC
+"""
+
+# =====================================================================================
+# QUERY DE PRODUTOS ÚNICOS
+# União de produtos de vendas, devoluções e estoque para garantir integridade
+# =====================================================================================
+SQL_PRODUTOS_UNICOS = """
+SELECT DISTINCT 
+    CODPROD, 
+    CODAUXILIAR, 
+    NBM, 
+    DESCRICAO, 
+    CODFORNEC, 
+    FORNECEDOR, 
+    PTABELA
+FROM (
+    -- ===== PRODUTOS DAS VENDAS =====
+    SELECT 
+        P.CODPROD, 
+        P.CODAUXILIAR, 
+        P.NBM, 
+        P.DESCRICAO,
+        FORN.CODFORNEC, 
+        FORN.FORNECEDOR, 
+        NVL(P.PVENDA, 0) AS PTABELA
+    FROM PRISMA.PCNFSAID N
+    INNER JOIN PRISMA.PCMOV M ON N.NUMTRANSVENDA = M.NUMTRANSVENDA
+    INNER JOIN PRISMA.PCPRODUT P ON M.CODPROD = P.CODPROD
+    INNER JOIN PRISMA.PCFORNEC FORN ON P.CODFORNEC = FORN.CODFORNEC
+    INNER JOIN PRISMA.PCMOVCOMPLE MC ON M.NUMTRANSITEM = MC.NUMTRANSITEM
+    WHERE 1=1
+        AND NVL(M.QT, 0) > 0
+        AND P.CODAUXILIAR IS NOT NULL
+        AND P.CODEPTO <> 196
+        AND TRUNC(N.DTSAIDA) = :DIA
+        AND N.CODFILIAL = :CODFILIAL
+    
+    UNION
+    
+    -- ===== PRODUTOS DAS DEVOLUÇÕES =====
+    SELECT 
+        PCPRODUT.CODPROD, 
+        PCPRODUT.CODAUXILIAR, 
+        PCPRODUT.NBM, 
+        PCPRODUT.DESCRICAO,
+        PCFORNEC.CODFORNEC, 
+        PCFORNEC.FORNECEDOR, 
+        NVL(PCPRODUT.PVENDA, 0) AS PTABELA
+    FROM PRISMA.PCNFENT
+    INNER JOIN PRISMA.PCESTCOM ON PCESTCOM.NUMTRANSENT = PCNFENT.NUMTRANSENT
+    INNER JOIN PRISMA.PCMOV ON PCESTCOM.NUMTRANSENT = PCMOV.NUMTRANSENT
+    INNER JOIN PRISMA.PCPRODUT ON PCMOV.CODPROD = PCPRODUT.CODPROD
+    INNER JOIN PRISMA.PCFORNEC ON PCPRODUT.CODFORNEC = PCFORNEC.CODFORNEC
+    INNER JOIN PRISMA.PCMOVCOMPLE ON PCMOV.NUMTRANSITEM = PCMOVCOMPLE.NUMTRANSITEM
+    LEFT JOIN PRISMA.PCNFSAID ON PCESTCOM.NUMTRANSVENDA = PCNFSAID.NUMTRANSVENDA
+    WHERE 1=1
+        AND NVL(PCNFENT.CODFILIALNF, PCNFENT.CODFILIAL) = :CODFILIAL
+        AND PCNFENT.TIPODESCARGA IN ('6', '7', 'T')
+        AND NVL(PCNFENT.OBS, 'X') <> 'NF CANCELADA'
+        AND PCNFENT.CODFISCAL IN ('131', '132', '231', '232', '199', '299')
+        AND PCMOV.DTCANCEL IS NULL
+        AND PCPRODUT.CODAUXILIAR IS NOT NULL
+        AND PCPRODUT.CODEPTO <> 196
+        AND NVL(PCNFSAID.CONDVENDA, 0) NOT IN (4, 8, 10, 13, 20, 98, 99)
+        AND TRUNC(PCNFENT.DTENT) = :DIA
+    
+    UNION
+    
+    -- ===== PRODUTOS DO ESTOQUE =====
+    SELECT 
+        P.CODPROD, 
+        P.CODAUXILIAR, 
+        P.NBM, 
+        P.DESCRICAO,
+        FORN.CODFORNEC, 
+        FORN.FORNECEDOR, 
+        NVL(P.PVENDA, 0) AS PTABELA
+    FROM PRISMA.PCEST E
+    INNER JOIN PRISMA.PCPRODUT P ON P.CODPROD = E.CODPROD
+    INNER JOIN PRISMA.PCFORNEC FORN ON P.CODFORNEC = FORN.CODFORNEC
+    WHERE 1=1
+        AND E.CODFILIAL = :CODFILIAL
+        AND P.CODAUXILIAR IS NOT NULL
+        AND P.CODEPTO <> 196
+        AND TRUNC(PRISMA.PKG_ESTOQUE.ESTOQUE_DISPONIVEL(P.CODPROD, E.CODFILIAL, 'VA', :DIA)) > 0
+)
+ORDER BY CODPROD
+"""
+
+# =====================================================================================
+# QUERY DE FILIAIS
+# Captura dados das filiais envolvidas em vendas e devoluções
+# =====================================================================================
+SQL_FILIAL = """
+SELECT DISTINCT 
+    CODFILIAL, 
+    RAZAOSOCIAL, 
+    CGC, 
+    FANTASIA_FILIAL,
+    ENDERECOFILIAL, 
+    CEP, 
+    CIDADE, 
+    UF, 
+    TELEFONE
+FROM (
+    -- ===== FILIAIS DAS VENDAS =====
+    SELECT 
+        F.CODIGO AS CODFILIAL, 
+        F.RAZAOSOCIAL, 
+        F.CGC, 
+        F.FANTASIA AS FANTASIA_FILIAL,
+        F.ENDERECO || ',' || NVL(F.NUMERO, '0') AS ENDERECOFILIAL,
+        F.CEP, 
+        F.CIDADE, 
+        F.UF, 
+        F.TELEFONE
+    FROM PRISMA.PCNFSAID N
+    INNER JOIN PRISMA.PCFILIAL F ON N.CODFILIAL = F.CODIGO
+    INNER JOIN PRISMA.PCMOV M ON N.NUMTRANSVENDA = M.NUMTRANSVENDA
+    INNER JOIN PRISMA.PCPRODUT P ON M.CODPROD = P.CODPROD
+    WHERE 1=1
+        AND P.CODAUXILIAR IS NOT NULL
+        AND P.CODEPTO <> 196
+        AND TRUNC(N.DTSAIDA) = :DIA
+        AND N.CODFILIAL = :CODFILIAL
+    
+    UNION
+    
+    -- ===== FILIAIS DAS DEVOLUÇÕES =====
+    SELECT 
+        F.CODIGO AS CODFILIAL, 
+        F.RAZAOSOCIAL, 
+        F.CGC, 
+        F.FANTASIA AS FANTASIA_FILIAL,
+        F.ENDERECO || ',' || NVL(F.NUMERO, '0') AS ENDERECOFILIAL,
+        F.CEP, 
+        F.CIDADE, 
+        F.UF, 
+        F.TELEFONE
+    FROM PRISMA.PCNFENT
+    INNER JOIN PRISMA.PCFILIAL F ON NVL(PCNFENT.CODFILIALNF, PCNFENT.CODFILIAL) = F.CODIGO
+    INNER JOIN PRISMA.PCESTCOM ON PCESTCOM.NUMTRANSENT = PCNFENT.NUMTRANSENT
+    INNER JOIN PRISMA.PCMOV ON PCESTCOM.NUMTRANSENT = PCMOV.NUMTRANSENT
+    INNER JOIN PRISMA.PCPRODUT ON PCMOV.CODPROD = PCPRODUT.CODPROD
+    WHERE 1=1
+        AND PCNFENT.TIPODESCARGA IN ('6', '7', 'T')
+        AND NVL(PCNFENT.OBS, 'X') <> 'NF CANCELADA'
+        AND PCNFENT.CODFISCAL IN ('131', '132', '231', '232', '199', '299')
+        AND PCMOV.DTCANCEL IS NULL
+        AND PCPRODUT.CODAUXILIAR IS NOT NULL
+        AND PCPRODUT.CODEPTO <> 196
+        AND TRUNC(PCNFENT.DTENT) = :DIA
+        AND NVL(PCNFENT.CODFILIALNF, PCNFENT.CODFILIAL) = :CODFILIAL
+)
+"""
+
+# =====================================================================================
+# QUERY DE CLIENTES
+# Captura clientes de vendas e devoluções
+# =====================================================================================
+SQL_CLIENTES = """
+SELECT DISTINCT 
+    CODCLI, 
+    CLIENTE, 
+    CGCENT, 
+    FANTASIA_CLIENT,
+    ENDERECOCLI, 
+    CEPENT, 
+    MUNICENT, 
+    ESTENT, 
+    TELENT
+FROM (
+    -- ===== CLIENTES DAS VENDAS =====
+    SELECT 
+        C.CODCLI, 
+        C.CLIENTE, 
+        C.CGCENT,
+        NVL(C.FANTASIA, C.CLIENTE) AS FANTASIA_CLIENT,
+        C.ENDERENT || ',' || NVL(C.NUMEROENT, '0') AS ENDERECOCLI,
+        C.CEPENT, 
+        C.MUNICENT, 
+        C.ESTENT, 
+        C.TELENT
+    FROM PRISMA.PCNFSAID N
+    INNER JOIN PRISMA.PCCLIENT C ON N.CODCLI = C.CODCLI
+    INNER JOIN PRISMA.PCMOV M ON N.NUMTRANSVENDA = M.NUMTRANSVENDA
+    INNER JOIN PRISMA.PCPRODUT P ON M.CODPROD = P.CODPROD
+    WHERE 1=1
+        AND P.CODAUXILIAR IS NOT NULL
+        AND P.CODEPTO <> 196
+        AND TRUNC(N.DTSAIDA) = :DIA
+        AND N.CODFILIAL = :CODFILIAL
+        
+    UNION
+    
+    -- ===== CLIENTES DAS DEVOLUÇÕES =====
+    SELECT 
+        COALESCE(PCCLIENT.CODCLI, 0) AS CODCLI,
+        COALESCE(PCCLIENT.CLIENTE, 'CLIENTE NAO IDENTIFICADO') AS CLIENTE,
+        COALESCE(PCCLIENT.CGCENT, '') AS CGCENT,
+        COALESCE(PCCLIENT.FANTASIA, PCCLIENT.CLIENTE) AS FANTASIA_CLIENT,
+        PCCLIENT.ENDERENT || ',' || NVL(PCCLIENT.NUMEROENT, '0') AS ENDERECOCLI,
+        PCCLIENT.CEPENT, 
+        PCCLIENT.MUNICENT, 
+        PCCLIENT.ESTENT, 
+        PCCLIENT.TELENT
+    FROM PRISMA.PCNFENT
+    INNER JOIN PRISMA.PCESTCOM ON PCESTCOM.NUMTRANSENT = PCNFENT.NUMTRANSENT
+    INNER JOIN PRISMA.PCMOV ON PCESTCOM.NUMTRANSENT = PCMOV.NUMTRANSENT
+    INNER JOIN PRISMA.PCPRODUT ON PCMOV.CODPROD = PCPRODUT.CODPROD
+    LEFT JOIN PRISMA.PCCLIENT ON PCNFENT.CODFORNEC = PCCLIENT.CODCLI
+    LEFT JOIN PRISMA.PCNFSAID ON PCESTCOM.NUMTRANSVENDA = PCNFSAID.NUMTRANSVENDA
+    WHERE 1=1
+        AND NVL(PCNFENT.CODFILIALNF, PCNFENT.CODFILIAL) = :CODFILIAL
+        AND PCNFENT.TIPODESCARGA IN ('6', '7', 'T')
+        AND NVL(PCNFENT.OBS, 'X') <> 'NF CANCELADA'
+        AND PCNFENT.CODFISCAL IN ('131', '132', '231', '232', '199', '299')
+        AND PCMOV.DTCANCEL IS NULL
+        AND PCPRODUT.CODAUXILIAR IS NOT NULL
+        AND PCPRODUT.CODEPTO <> 196
+        AND NVL(PCNFSAID.CONDVENDA, 0) NOT IN (4, 8, 10, 13, 20, 98, 99)
+        AND TRUNC(PCNFENT.DTENT) = :DIA
+        AND PCCLIENT.CODCLI IS NOT NULL
+)
+WHERE 1=1
+    AND REPLACE(REPLACE(REPLACE(CGCENT,'.',''),'/',''),'-','') <> '06112992000125'  -- Excluir CNPJ específico
+    AND CODCLI > 0                                                                   -- Cliente válido
+
+ORDER BY CODCLI
+"""

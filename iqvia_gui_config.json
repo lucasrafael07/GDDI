@@ -1,0 +1,22 @@
+{
+  "instant_client_dir": "C:/IQVIA/ClientLight/instantclient_23_8",
+  "db_host": "192.168.0.5",
+  "db_port": 1521,
+  "db_sid": "WINT",
+  "db_user": "PRISMA",
+  "db_pass": "PRISMA",
+  "current_schema": "PRISMA",
+  "iqvia_client_id": "PRISMA_CD",
+  "iqvia_client_secret": "4X3O}bIpF6b6^<]n",
+  "iqvia_token_url": "https://dataentry.solutions.iqvia.com/api/v1/security/authenticate",
+  "iqvia_upload_url": "https://dataentry.solutions.iqvia.com/api/v1/layout1/upload",
+  "codfilial": 1,
+  "codiqvia": "0892",
+  "out_dir": "C:/IQVIA/envios",
+  "last_ini": "30/07/2025",
+  "last_fim": "31/07/2025",
+  "theme": "darkly",
+  "upload_default": false,
+  "validation_enabled": true,
+  "layout_example_path": ""
+}
