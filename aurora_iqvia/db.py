@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from pathlib import Path
 import json
-from typing import Optional
+from typing import Optional, Dict, Any, List
 import oracledb
 
 CONFIG_FILE = Path(__file__).resolve().parent.parent / "iqvia_gui_config.json"
@@ -36,10 +36,19 @@ class AppConfig:
     layout_example_path: str = ""
 
     def save(self):
+        """
+        Salva a configuração atual em arquivo JSON.
+        """
         CONFIG_FILE.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
 
     @staticmethod
     def load() -> "AppConfig":
+        """
+        Carrega a configuração do arquivo JSON.
+        
+        Returns:
+            Objeto AppConfig com a configuração carregada ou padrão
+        """
         if CONFIG_FILE.is_file():
             try:
                 data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
@@ -51,6 +60,15 @@ class AppConfig:
         return cfg
 
 def init_oracle_client(lib_dir: str):
+    """
+    Inicializa o Oracle Client.
+    
+    Args:
+        lib_dir: Diretório do Oracle Instant Client
+        
+    Raises:
+        RuntimeError: Se o diretório do Instant Client não for encontrado
+    """
     p = Path(lib_dir)
     if not p.exists():
         raise RuntimeError(f"Instant Client não encontrado: {p}")
@@ -61,6 +79,15 @@ def init_oracle_client(lib_dir: str):
         pass
 
 def connect_oracle(cfg: AppConfig):
+    """
+    Conecta ao banco de dados Oracle.
+    
+    Args:
+        cfg: Configuração da aplicação
+        
+    Returns:
+        Conexão com o banco de dados
+    """
     init_oracle_client(cfg.instant_client_dir)
     dsn = oracledb.makedsn(cfg.db_host, cfg.db_port, sid=cfg.db_sid)
     conn = oracledb.connect(user=cfg.db_user, password=cfg.db_pass, dsn=dsn)
@@ -73,7 +100,41 @@ def connect_oracle(cfg: AppConfig):
         pass
     return conn
 
+def fetch_df(conn, sql: str, **binds):
+    """
+    Executa uma consulta SQL e retorna os resultados como DataFrame.
+    
+    Args:
+        conn: Conexão com o banco de dados
+        sql: Consulta SQL
+        **binds: Parâmetros para bind na consulta
+        
+    Returns:
+        DataFrame com os resultados da consulta
+        
+    Raises:
+        RuntimeError: Se pandas não estiver instalado
+    """
+    cur = conn.cursor()
+    cur.execute(sql, binds)
+    cols = [c[0] for c in cur.description]
+    rows = cur.fetchall()
+    try:
+        import pandas as pd
+        return pd.DataFrame.from_records(rows, columns=cols)
+    except ImportError:
+        raise RuntimeError("Pandas não instalado. pip install pandas")
+
 def test_connection(cfg: AppConfig) -> str:
+    """
+    Testa a conexão com o banco de dados Oracle.
+    
+    Args:
+        cfg: Configuração da aplicação
+        
+    Returns:
+        Mensagem de sucesso com a versão do banco
+    """
     conn = connect_oracle(cfg)
     try:
         ver = conn.version

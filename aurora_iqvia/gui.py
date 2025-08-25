@@ -8,11 +8,13 @@ from ttkbootstrap.constants import *
 from ttkbootstrap.widgets import DateEntry
 from tkinter import filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
+import json
 
-from .db import AppConfig
-from .controller import run_period
-from .utils import parse_br_date
-from .iqvia_api import test_comm
+from .db import AppConfig, connect_oracle, test_connection
+from .controller import run_period, build_payload, save_json, get_layout_version, get_layout_changes
+from .utils import parse_br_date, beautify_json
+from .iqvia_api import test_comm, check_upload_status, get_token
+from .sql_prisma import SQL_MOV, SQL_DEVOLUCOES, SQL_FILIAL, SQL_CLIENTES, SQL_ESTOQUE, SQL_PRODUTOS_UNICOS, SQL_ENTRADA_PRODUTOS
 
 APP_TITLE = "GDDI – Gerador de dados IQVIA — by Aurora Business Intelligence"
 
@@ -41,14 +43,21 @@ class App(tb.Window):
         top.pack(fill=X)
         tb.Label(top, text="GDDI", font=("Segoe UI", 18, "bold")).pack(side=TOP, anchor="center")
         tb.Label(top, text=APP_TITLE, font=("Segoe UI", 10)).pack(side=TOP, anchor="center")
+        # Versão do layout
+        version_text = f"Layout v{get_layout_version()}"
+        version_label = tb.Label(top, text=version_text, font=("Segoe UI", 8))
+        version_label.pack(side=TOP, anchor="center")
+        version_label.bind("<Button-1>", self._show_version_history)
 
         nb = tb.Notebook(self, bootstyle="dark")
         nb.pack(fill=BOTH, expand=YES, padx=8, pady=8)
         self.tab_run = tb.Frame(nb, padding=8)
         self.tab_cfg = tb.Frame(nb, padding=8)
+        self.tab_monitor = tb.Frame(nb, padding=8) # Nova aba para monitoramento
         self.tab_about = tb.Frame(nb, padding=8)
         nb.add(self.tab_run, text="Execução")
         nb.add(self.tab_cfg, text="Configurações")
+        nb.add(self.tab_monitor, text="Monitor de Uploads")
         nb.add(self.tab_about, text="Sobre")
 
         # Execução
@@ -78,6 +87,8 @@ class App(tb.Window):
         tb.Button(r3, text="Testar conexão Oracle", command=self._test_conn, bootstyle="secondary").pack(side=LEFT, padx=6)
         tb.Button(r3, text="Testar comunicação IQVIA", command=self._test_iqvia, bootstyle="info").pack(side=LEFT, padx=6)
         tb.Button(r3, text="Abrir saída", command=self._open_out, bootstyle="secondary-outline").pack(side=LEFT, padx=6)
+        # Novo botão para visualização prévia do JSON
+        tb.Button(r3, text="Visualizar JSON", command=self._preview_json, bootstyle="warning").pack(side=LEFT, padx=6)
 
         self.pbar = tb.Progressbar(self.tab_run, mode="determinate")
         self.pbar.pack(fill=X, pady=6)
@@ -122,6 +133,26 @@ class App(tb.Window):
 
         tb.Button(fc, text="Salvar configurações", command=self._save_cfg, bootstyle="primary").pack(side=RIGHT, pady=8)
 
+        # Monitor de Uploads
+        tm = self.tab_monitor
+        tb.Label(tm, text="Monitor de Status de Uploads", font=("Segoe UI", 14, "bold")).pack(pady=(4,10))
+
+        tm1 = tb.Frame(tm)
+        tm1.pack(fill=X, pady=4)
+        tb.Label(tm1, text="GUID do Upload:").pack(side=LEFT, padx=(6,6))
+        self.guid_var = tb.StringVar()
+        tb.Entry(tm1, textvariable=self.guid_var, width=40).pack(side=LEFT, padx=(0,10))
+        tb.Button(tm1, text="Verificar Status", command=self._check_upload_status, bootstyle="info").pack(side=LEFT)
+        tb.Button(tm1, text="Limpar", command=lambda: self.monitor_txt.delete(1.0, END), bootstyle="secondary-outline").pack(side=LEFT, padx=6)
+
+        tm2 = tb.Frame(tm)
+        tm2.pack(fill=X, pady=4)
+        tb.Label(tm2, text="Histórico de uploads recentes:").pack(side=LEFT, padx=(6,6))
+        tb.Button(tm2, text="Carregar", command=self._load_recent_uploads, bootstyle="secondary").pack(side=LEFT, padx=6)
+
+        self.monitor_txt = ScrolledText(tm, height=26)
+        self.monitor_txt.pack(fill=BOTH, expand=YES, pady=(6,4))
+
         # Sobre
         sa = self.tab_about
         tb.Label(sa, text="GDDI – Gerador de dados IQVIA", font=("Segoe UI", 14, "bold")).pack(pady=(4,2))
@@ -130,6 +161,12 @@ class App(tb.Window):
         def _open_doc():
             import webbrowser; webbrowser.open("https://dataentry.solutions.iqvia.com/doc/")
         tb.Button(sa, text="Abrir documentação oficial da IQVIA", command=_open_doc, bootstyle="info-outline").pack(pady=4)
+        
+        # Exibir versão e histórico
+        version_frame = tb.Frame(sa)
+        version_frame.pack(pady=10)
+        tb.Label(version_frame, text=f"Versão do Layout: {get_layout_version()}", font=("Segoe UI", 10, "bold")).pack(pady=2)
+        tb.Button(version_frame, text="Ver histórico de alterações", command=self._show_version_history, bootstyle="secondary-outline").pack(pady=2)
 
     # helpers
     def _row(self, parent, label, value, show=None, picker=False):
@@ -218,7 +255,6 @@ class App(tb.Window):
     def _test_conn(self):
         self._save_cfg()
         self._log("🔌 Testando conexão Oracle...")
-        from .db import test_connection
         try:
             res = test_connection(self.cfg)
             self._log("✅ " + res)
@@ -255,6 +291,255 @@ class App(tb.Window):
             self._save_cfg()
         finally:
             self.destroy()
+
+    # --- Novas funções implementadas ---
+    
+    def _preview_json(self):
+        """Mostra visualização prévia do JSON para um dia selecionado"""
+        try:
+            d0 = parse_br_date(self.dt_ini.entry.get().strip())
+            
+            self._log("🔍 Gerando prévia do JSON para o dia " + d0.strftime("%d/%m/%Y") + "...")
+            
+            # Conecta ao Oracle e gera o payload para um único dia
+            conn = connect_oracle(self.cfg)
+            try:
+                # Consultas para um único dia
+                from .db import fetch_df
+                
+                # Carregar dados
+                mov = fetch_df(conn, SQL_MOV, DIA=d0, CODFILIAL=self.cfg.codfilial)
+                dev = fetch_df(conn, SQL_DEVOLUCOES, DIA=d0, CODFILIAL=self.cfg.codfilial)
+                fil = fetch_df(conn, SQL_FILIAL, DIA=d0, CODFILIAL=self.cfg.codfilial)
+                cli = fetch_df(conn, SQL_CLIENTES, DIA=d0, CODFILIAL=self.cfg.codfilial)
+                est = fetch_df(conn, SQL_ESTOQUE, DIA=d0, CODFILIAL=self.cfg.codfilial)
+                produtos_unicos = fetch_df(conn, SQL_PRODUTOS_UNICOS, DIA=d0, CODFILIAL=self.cfg.codfilial)
+                entradas = fetch_df(conn, SQL_ENTRADA_PRODUTOS, DIA=d0, CODFILIAL=self.cfg.codfilial)
+                
+                # Preparar dados de entrada
+                dados_entrada = {}
+                for r in entradas.itertuples(index=False):
+                    dados_entrada[int(getattr(r, "CODPROD"))] = {
+                        "ean": getattr(r, "CODAUXILIAR", "") or "",
+                        "preco": float(getattr(r, "PTABELA", 0.0) or 0.0)
+                    }
+                
+                # Gerar payload
+                payload = build_payload(
+                    mov, dev, fil, cli, est, produtos_unicos, dados_entrada,
+                    d0, self.cfg.iqvia_client_id, self.cfg.codiqvia, self._log
+                )
+                
+                self._log(f"✅ Prévia gerada com sucesso! Exibindo em nova janela...")
+                
+                # Exibir prévia em nova janela
+                preview_window = tb.Toplevel(self)
+                preview_window.title(f"Prévia do JSON - {d0.strftime('%d/%m/%Y')}")
+                preview_window.geometry("900x700")
+                
+                # Adicionar stats no topo
+                stats_frame = tb.Frame(preview_window)
+                stats_frame.pack(fill=X, padx=8, pady=8)
+                
+                stats = [
+                    f"📊 Estabelecimentos: {len(payload['estabelecimentos'])}",
+                    f"👥 Clientes: {len(payload['clientes'])}",
+                    f"📦 Produtos: {len(payload['produtos'])}",
+                    f"💰 Vendas: {len(payload['vendas'])}",
+                    f"🔄 Devoluções: {len(payload['vendasDevolucoesCancelamentos'])}",
+                    f"📋 Estoque: {len(payload['estoque'])}"
+                ]
+                
+                for i, stat in enumerate(stats):
+                    tb.Label(stats_frame, text=stat, font=("Segoe UI", 9)).grid(row=i//3, column=i%3, padx=10, pady=2, sticky="w")
+                
+                # JSON Content
+                content_frame = tb.Frame(preview_window)
+                content_frame.pack(fill=BOTH, expand=YES, padx=8, pady=8)
+                
+                txt = ScrolledText(content_frame)
+                txt.pack(fill=BOTH, expand=YES)
+                txt.insert(END, beautify_json(payload))
+                
+                # Barra de botões
+                btn_frame = tb.Frame(preview_window)
+                btn_frame.pack(fill=X, padx=8, pady=8)
+                
+                # Adicionar botões
+                tb.Button(btn_frame, text="Copiar JSON", 
+                         command=lambda: self._copy_to_clipboard(beautify_json(payload), preview_window),
+                         bootstyle="info").pack(side=LEFT, padx=5)
+                
+                tb.Button(btn_frame, text="Salvar como...", 
+                         command=lambda: self._save_preview_json(payload),
+                         bootstyle="success").pack(side=LEFT, padx=5)
+                
+                tb.Button(btn_frame, text="Fechar", 
+                         command=preview_window.destroy,
+                         bootstyle="secondary").pack(side=RIGHT, padx=5)
+                
+            finally:
+                conn.close()
+                
+        except Exception as e:
+            self._log(f"❌ Erro ao gerar prévia: {str(e)}")
+            messagebox.showerror("Erro", str(e))
+    
+    def _copy_to_clipboard(self, text, parent_window=None):
+        """Copia texto para a área de transferência"""
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        
+        if parent_window:
+            lbl = tb.Label(parent_window, text="✓ Copiado para a área de transferência!", 
+                          bootstyle="success", font=("Segoe UI", 9))
+            lbl.pack(side=BOTTOM, pady=5)
+            parent_window.after(2000, lbl.destroy)
+    
+    def _save_preview_json(self, payload):
+        """Salva o JSON de prévia em um arquivo"""
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Salvar prévia do JSON"
+        )
+        if filename:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(beautify_json(payload))
+            self._log(f"💾 Prévia salva em: {filename}")
+    
+    def _check_upload_status(self):
+        """Verifica o status de um upload específico"""
+        guid = self.guid_var.get().strip()
+        if not guid:
+            messagebox.showwarning("Aviso", "Informe o GUID do upload para verificar seu status.")
+            return
+        
+        self.monitor_txt.delete(1.0, END)
+        self.monitor_txt.insert(END, f"🔍 Verificando status do upload {guid}...\n")
+        
+        try:
+            # Obter token primeiro
+            token = get_token(
+                self.cfg.iqvia_token_url, 
+                self.cfg.iqvia_client_id, 
+                self.cfg.iqvia_client_secret
+            )
+            
+            if not token:
+                self.monitor_txt.insert(END, "❌ Falha ao obter token de autenticação.\n")
+                return
+            
+            # Obter URL base a partir da URL de upload
+            base_url = self.cfg.iqvia_upload_url.rsplit('/', 1)[0]
+            
+            # Verificar status
+            status = check_upload_status(base_url, guid, token)
+            
+            self.monitor_txt.insert(END, f"📊 Dados do upload {guid}:\n\n")
+            self.monitor_txt.insert(END, beautify_json(status))
+            
+            # Salvar no histórico
+            self._save_upload_history(guid, status)
+            
+        except Exception as e:
+            self.monitor_txt.insert(END, f"❌ Erro ao verificar status: {str(e)}\n")
+    
+    def _save_upload_history(self, guid, status):
+        """Salva o histórico de uploads para consultas futuras"""
+        history_dir = Path(self.cfg.out_dir) / "history"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        
+        history_file = history_dir / "upload_history.json"
+        
+        # Carregar histórico existente
+        history = {}
+        if history_file.exists():
+            try:
+                history = json.loads(history_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        
+        # Adicionar novo registro
+        from datetime import datetime
+        history[guid] = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": status
+        }
+        
+        # Salvar histórico
+        history_file.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    
+    def _load_recent_uploads(self):
+        """Carrega histórico de uploads recentes"""
+        history_dir = Path(self.cfg.out_dir) / "history"
+        history_file = history_dir / "upload_history.json"
+        
+        if not history_file.exists():
+            self.monitor_txt.delete(1.0, END)
+            self.monitor_txt.insert(END, "ℹ️ Nenhum histórico de uploads encontrado.\n")
+            return
+        
+        try:
+            history = json.loads(history_file.read_text(encoding="utf-8"))
+            
+            self.monitor_txt.delete(1.0, END)
+            self.monitor_txt.insert(END, "📜 Histórico de uploads recentes:\n\n")
+            
+            # Ordenar por timestamp mais recente
+            sorted_guids = sorted(
+                history.keys(),
+                key=lambda k: history[k].get("timestamp", ""),
+                reverse=True
+            )
+            
+            for guid in sorted_guids[:10]:  # Mostrar apenas os 10 mais recentes
+                entry = history[guid]
+                timestamp = entry.get("timestamp", "Data desconhecida")
+                status_data = entry.get("status", {})
+                status = status_data.get("status", "Desconhecido")
+                
+                self.monitor_txt.insert(END, f"GUID: {guid}\n")
+                self.monitor_txt.insert(END, f"Data: {timestamp}\n")
+                self.monitor_txt.insert(END, f"Status: {status}\n")
+                self.monitor_txt.insert(END, "-" * 50 + "\n")
+            
+        except Exception as e:
+            self.monitor_txt.delete(1.0, END)
+            self.monitor_txt.insert(END, f"❌ Erro ao carregar histórico: {str(e)}\n")
+    
+    def _show_version_history(self, event=None):
+        """Exibe o histórico de versões do layout"""
+        version_window = tb.Toplevel(self)
+        version_window.title("Histórico de Versões do Layout")
+        version_window.geometry("500x400")
+        
+        tb.Label(version_window, text="Histórico de Versões do Layout IQVIA", 
+                font=("Segoe UI", 14, "bold")).pack(pady=(10,15))
+        
+        # Obter histórico de versões
+        version_history = get_layout_changes()
+        current_version = get_layout_version()
+        
+        # Exibir versão atual
+        tb.Label(version_window, text=f"Versão atual: {current_version}", 
+                font=("Segoe UI", 10, "bold")).pack(pady=(0,10))
+        
+        # Exibir histórico
+        history_frame = tb.Frame(version_window)
+        history_frame.pack(fill=BOTH, expand=YES, padx=20, pady=10)
+        
+        for i, (version, changes) in enumerate(version_history.items()):
+            version_label = tb.Label(history_frame, text=f"v{version}", font=("Segoe UI", 10, "bold"))
+            version_label.grid(row=i, column=0, sticky="nw", padx=(0,10), pady=(5,2))
+            
+            changes_label = tb.Label(history_frame, text=changes, wraplength=350, justify=LEFT)
+            changes_label.grid(row=i, column=1, sticky="nw", pady=(5,2))
+        
+        # Botão para fechar
+        tb.Button(version_window, text="Fechar", command=version_window.destroy,
+                 bootstyle="secondary").pack(pady=15)
+
 
 def run_app():
     App().mainloop()

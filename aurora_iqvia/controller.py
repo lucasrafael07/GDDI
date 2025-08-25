@@ -4,7 +4,7 @@ import sys
 import os
 from pathlib import Path
 from typing import Dict, Any, List, Callable
-from datetime import date
+from datetime import date, datetime
 import io, zipfile, json
 
 # Para execução direta
@@ -13,7 +13,7 @@ if __name__ == "__main__":
 
 # Imports (relativos e absolutos)
 try:
-    from .db import AppConfig, connect_oracle
+    from .db import AppConfig, connect_oracle, fetch_df
     from .sql_prisma import (
         SQL_MOV, SQL_DEVOLUCOES, SQL_FILIAL, SQL_CLIENTES,
         SQL_ESTOQUE, SQL_PRODUTOS_UNICOS, SQL_ENTRADA_PRODUTOS
@@ -22,7 +22,7 @@ try:
     from .iqvia_api import get_token, upload_zip
     from .validator import validate_payload, load_spec
 except ImportError:
-    from aurora_iqvia.db import AppConfig, connect_oracle
+    from aurora_iqvia.db import AppConfig, connect_oracle, fetch_df
     from aurora_iqvia.sql_prisma import (
         SQL_MOV, SQL_DEVOLUCOES, SQL_FILIAL, SQL_CLIENTES,
         SQL_ESTOQUE, SQL_PRODUTOS_UNICOS, SQL_ENTRADA_PRODUTOS
@@ -32,32 +32,120 @@ except ImportError:
     from aurora_iqvia.validator import validate_payload, load_spec
 
 # --------------------------
+# Controle de versão do layout
+# --------------------------
+LAYOUT_VERSION = "1.0.3"
+
+def get_layout_version():
+    """Retorna a versão atual do layout"""
+    return LAYOUT_VERSION
+
+def get_layout_changes():
+    """Retorna histórico de mudanças no layout"""
+    return {
+        "1.0.3": "Correção na estrutura de preços e brindes. Adicionado tratamento de descontos para brindes com preço de tabela exibido.",
+        "1.0.2": "Adicionado campo tipoCaptacaoPrescricao nos estabelecimentos. Corrigido problema de 611 produtos faltantes no estoque.",
+        "1.0.1": "Corrigido formato de série fiscal para STRING. Adicionada validação de layout.",
+        "1.0.0": "Versão inicial do layout unificado IQVIA."
+    }
+
+# --------------------------
 # Helpers de formatação
 # --------------------------
 def format_cep(cep: str) -> str:
+    """
+    Formata CEP conforme especificação IQVIA.
+    
+    Args:
+        cep: String contendo o CEP com ou sem máscara
+        
+    Returns:
+        String de 8 dígitos sem máscara e com zeros à esquerda
+        
+    Examples:
+        >>> format_cep("12345-678")
+        "12345678"
+        >>> format_cep("1234")
+        "00001234"
+    """
     if not cep:
         return ""
     d = only_digits(cep).zfill(8)
     return d[:8]
 
 def format_cnpj(cnpj: str) -> str:
+    """
+    Formata CNPJ conforme especificação IQVIA.
+    
+    Args:
+        cnpj: String contendo o CNPJ com ou sem máscara
+        
+    Returns:
+        String de 14 dígitos sem máscara e com zeros à esquerda
+        
+    Examples:
+        >>> format_cnpj("12.345.678/0001-99")
+        "12345678000199"
+        >>> format_cnpj("123456")
+        "00000000123456"  # truncado para 14 dígitos
+    """
     if not cnpj:
         return ""
     d = only_digits(cnpj).zfill(14)
     return d[:14]
 
 def format_cpf(cpf: str) -> str:
+    """
+    Formata CPF conforme especificação IQVIA.
+    
+    Args:
+        cpf: String contendo o CPF com ou sem máscara
+        
+    Returns:
+        String de 11 dígitos sem máscara e com zeros à esquerda
+        
+    Examples:
+        >>> format_cpf("123.456.789-00")
+        "12345678900"
+        >>> format_cpf("123456")
+        "00000123456"
+    """
     if not cpf:
         return ""
     d = only_digits(cpf).zfill(11)
     return d[:11]
 
 def format_telefone(phone: str) -> str:
+    """
+    Formata telefone conforme especificação IQVIA.
+    
+    Args:
+        phone: String contendo o telefone com ou sem máscara
+        
+    Returns:
+        String apenas com dígitos
+        
+    Examples:
+        >>> format_telefone("(11) 98765-4321")
+        "11987654321"
+        >>> format_telefone("")
+        ""
+    """
     if not phone:
         return ""
     return only_digits(phone)[:11]
 
 def clean_text(text: str | None) -> str:
+    """
+    Limpa e normaliza texto, removendo caracteres problemáticos e corrigindo
+    codificação de caracteres especiais.
+    
+    Args:
+        text: String a ser limpa
+        
+    Returns:
+        String limpa e normalizada
+    """
     if not text:
         return ""
     try:
@@ -76,24 +164,20 @@ def clean_text(text: str | None) -> str:
     return " ".join(text.split())
 
 def validate_field_length(value: str, max_length: int = 40) -> str:
+    """
+    Valida e trunca um valor para o tamanho máximo especificado.
+    
+    Args:
+        value: String a ser validada
+        max_length: Tamanho máximo permitido (default: 40)
+        
+    Returns:
+        String limpa e truncada se necessário
+    """
     if value is None:
         return ""
     s = clean_text(str(value))
     return s[:max_length] if len(s) > max_length else s
-
-# --------------------------
-# DB helper
-# --------------------------
-def fetch_df(conn, sql: str, **binds):
-    cur = conn.cursor()
-    cur.execute(sql, binds)
-    cols = [c[0] for c in cur.description]
-    rows = cur.fetchall()
-    try:
-        import pandas as pd
-        return pd.DataFrame.from_records(rows, columns=cols)
-    except ImportError:
-        raise RuntimeError("Pandas não instalado. pip install pandas")
 
 # --------------------------
 # Payload
@@ -102,6 +186,25 @@ def build_payload(
     mov, dev, fil, cli, est, produtos_unicos, dados_entrada,
     data_arquivo: date, client_id: str, codiqvia: str, logger: Callable[[str], None]
 ) -> Dict[str, Any]:
+    """
+    Constrói o payload JSON no formato IQVIA a partir dos dados extraídos.
+    
+    Args:
+        mov: DataFrame com movimentações de vendas
+        dev: DataFrame com devoluções
+        fil: DataFrame com dados das filiais
+        cli: DataFrame com dados dos clientes
+        est: DataFrame com dados de estoque
+        produtos_unicos: DataFrame com produtos únicos
+        dados_entrada: Dicionário com dados complementares de entrada
+        data_arquivo: Data de referência do arquivo
+        client_id: ID do cliente na IQVIA
+        codiqvia: Código IQVIA do estabelecimento
+        logger: Função para log de mensagens
+        
+    Returns:
+        Dicionário com o payload completo no formato IQVIA
+    """
 
     # -------- Estabelecimentos --------
     logger("...dados das filiais")
@@ -310,14 +413,35 @@ def build_payload(
 # Persistência (JSON/ZIP) e execução de período
 # --------------------------
 def save_json(payload: Dict[str, Any], client_id: str, dia: date, out_dir: Path) -> Path:
-    """Salva payload como arquivo JSON"""
+    """
+    Salva payload como arquivo JSON.
+    
+    Args:
+        payload: Dicionário com o payload
+        client_id: ID do cliente
+        dia: Data de referência 
+        out_dir: Diretório de saída
+        
+    Returns:
+        Path do arquivo salvo
+    """
     name = f"U_{client_id.upper()}_{dia.strftime('%Y%m%d')}.json"
     fp = out_dir / name
     fp.write_text(beautify_json(payload), encoding="utf-8")
     return fp
 
 def zip_period(json_paths: List[Path], client_id: str, out_dir: Path):
-    """Cria arquivo ZIP com os JSONs do período"""
+    """
+    Cria arquivo ZIP com os JSONs do período.
+    
+    Args:
+        json_paths: Lista de paths dos arquivos JSON
+        client_id: ID do cliente
+        out_dir: Diretório de saída
+        
+    Returns:
+        Tuple com path do zip e MD5 do conteúdo
+    """
     json_paths = sorted(json_paths, key=lambda p: p.name)
     ini = json_paths[0].stem[-8:]
     fim = json_paths[-1].stem[-8:]
@@ -332,11 +456,22 @@ def zip_period(json_paths: List[Path], client_id: str, out_dir: Path):
     return zip_path, md5_bytes(buf.getvalue())
 
 def run_period(cfg: AppConfig, d0, d1, upload: bool, logger, validate: bool=False, example_layout: str=""):
-    """Executa processamento para um período de datas"""
+    """
+    Executa processamento para um período de datas.
+    
+    Args:
+        cfg: Configuração da aplicação
+        d0: Data inicial
+        d1: Data final
+        upload: Se deve fazer upload para IQVIA
+        logger: Função para log
+        validate: Se deve validar o JSON
+        example_layout: Caminho para layout de exemplo
+    """
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger("🔌 Conectando ao Oracle...")
+    logger(f"🔌 Conectando ao Oracle...")
     conn = connect_oracle(cfg)
     logger(f"✅ Conectado. DB version: {conn.version}")
 
@@ -408,6 +543,36 @@ def run_period(cfg: AppConfig, d0, d1, upload: bool, logger, validate: bool=Fals
                     logger("📤 Enviando ZIP...")
                     resp = upload_zip(cfg.iqvia_upload_url, zip_path, tok, logger=logger)
                     logger("✅ Retorno IQVIA: " + json.dumps(resp, ensure_ascii=False))
+                    
+                    # Salvar histórico de uploads
+                    try:
+                        history_dir = out_dir / "history"
+                        history_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        history_file = history_dir / "upload_history.json"
+                        
+                        # Carregar histórico existente
+                        history = {}
+                        if history_file.exists():
+                            try:
+                                history = json.loads(history_file.read_text(encoding="utf-8"))
+                            except Exception:
+                                pass
+                        
+                        # Adicionar novo registro
+                        if 'guid' in resp:
+                            history[resp['guid']] = {
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "status": resp,
+                                "file": zip_path.name,
+                                "period": f"{d0.strftime('%d/%m/%Y')} a {d1.strftime('%d/%m/%Y')}"
+                            }
+                            
+                            # Salvar histórico
+                            history_file.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+                            logger(f"📝 Histórico de upload salvo: guid={resp['guid']}")
+                    except Exception as e:
+                        logger(f"⚠️ Erro ao salvar histórico: {str(e)}")
         else:
             logger("⚠️ Nenhum arquivo JSON foi gerado.")
 
@@ -418,3 +583,91 @@ def run_period(cfg: AppConfig, d0, d1, upload: bool, logger, validate: bool=Fals
             conn.close()
         except Exception:
             pass
+
+def diagnose_system(cfg: AppConfig, logger: Callable[[str], None]) -> List[str]:
+    """
+    Realiza diagnóstico do ambiente e dependências.
+    
+    Args:
+        cfg: Configuração da aplicação
+        logger: Função para log
+        
+    Returns:
+        Lista de problemas encontrados
+    """
+    issues = []
+    
+    # Verificar Oracle Instant Client
+    try:
+        import oracledb
+        version = oracledb.clientversion()
+        logger(f"✅ Oracle Instant Client: {version}")
+    except Exception as e:
+        msg = f"❌ Problema com Oracle Instant Client: {str(e)}"
+        logger(msg)
+        issues.append(msg)
+    
+    # Verificar diretório de saída
+    out_dir = Path(cfg.out_dir)
+    if not out_dir.exists():
+        msg = f"⚠️ Diretório de saída não existe: {out_dir}"
+        logger(msg)
+        issues.append(msg)
+    else:
+        try:
+            # Tentar criar arquivo de teste
+            test_file = out_dir / "__test_write.tmp"
+            test_file.write_text("test", encoding="utf-8")
+            test_file.unlink()  # remover após teste
+            logger(f"✅ Diretório de saída ({out_dir}) tem permissão de escrita")
+        except Exception as e:
+            msg = f"❌ Problema de permissão no diretório de saída: {str(e)}"
+            logger(msg)
+            issues.append(msg)
+    
+    # Verificar conectividade com IQVIA
+    try:
+        import requests
+        r = requests.get("https://dataentry.solutions.iqvia.com/", timeout=5)
+        if r.ok:
+            logger("✅ Conectividade com IQVIA: OK")
+        else:
+            msg = f"⚠️ Problema de conectividade com IQVIA: HTTP {r.status_code}"
+            logger(msg)
+            issues.append(msg)
+    except Exception as e:
+        msg = f"❌ Erro ao testar conectividade com IQVIA: {str(e)}"
+        logger(msg)
+        issues.append(msg)
+    
+    # Verificar espaço em disco
+    try:
+        import shutil
+        disk = shutil.disk_usage(str(out_dir))
+        free_gb = disk.free / 1_000_000_000
+        if free_gb < 1:  # Menos de 1GB livre
+            msg = f"⚠️ Pouco espaço em disco: {free_gb:.2f}GB disponível"
+            logger(msg)
+            issues.append(msg)
+        else:
+            logger(f"✅ Espaço em disco: {free_gb:.2f}GB disponível")
+    except Exception as e:
+        logger(f"⚠️ Não foi possível verificar espaço em disco: {str(e)}")
+    
+    # Verificar dependências Python
+    try:
+        import pkg_resources
+        required = {"ttkbootstrap", "requests", "pandas", "oracledb"}
+        installed = {pkg.key for pkg in pkg_resources.working_set}
+        missing = required - installed
+        
+        if missing:
+            msg = f"❌ Dependências faltando: {', '.join(missing)}"
+            logger(msg)
+            issues.append(msg)
+        else:
+            logger("✅ Todas as dependências Python estão instaladas")
+    except Exception as e:
+        logger(f"⚠️ Não foi possível verificar dependências: {str(e)}")
+    
+    return issues
