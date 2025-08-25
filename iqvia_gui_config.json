@@ -12,11 +12,11 @@
   "iqvia_upload_url": "https://dataentry.solutions.iqvia.com/api/v1/layout1/upload",
   "codfilial": 1,
   "codiqvia": "0892",
-  "out_dir": "C:/IQVIA/envios",
-  "last_ini": "28/07/2025",
-  "last_fim": "28/07/2025",
+  "out_dir": "C:/Python/GDDI/send",
+  "last_ini": "01/07/2025",
+  "last_fim": "31/07/2025",
   "theme": "darkly",
-  "upload_default": false,
+  "upload_default": true,
   "validation_enabled": true,
   "layout_example_path": ""
 }
