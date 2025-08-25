@@ -14,7 +14,10 @@ if __name__ == "__main__":
 # Tentar imports relativos primeiro, depois absolutos
 try:
     from .db import AppConfig, connect_oracle
-    from .sql_prisma import SQL_MOV, SQL_DEVOLUCOES, SQL_FILIAL, SQL_CLIENTES, SQL_ESTOQUE, SQL_PRODUTOS_UNICOS, SQL_ENTRADA_PRODUTOS
+    from .sql_prisma import (
+        SQL_MOV, SQL_DEVOLUCOES, SQL_FILIAL, SQL_CLIENTES, 
+        SQL_ESTOQUE, SQL_PRODUTOS_UNICOS, SQL_ENTRADA_PRODUTOS
+    )
     from .utils import only_digits, md5_bytes, beautify_json, daterange
     from .iqvia_api import get_token, upload_zip
     from .validator import validate_payload, load_spec
@@ -22,7 +25,10 @@ except ImportError:
     # Se imports relativos falharem, tentar imports absolutos
     try:
         from aurora_iqvia.db import AppConfig, connect_oracle
-        from aurora_iqvia.sql_prisma import SQL_MOV, SQL_DEVOLUCOES, SQL_FILIAL, SQL_CLIENTES, SQL_ESTOQUE, SQL_PRODUTOS_UNICOS, SQL_ENTRADA_PRODUTOS
+        from aurora_iqvia.sql_prisma import (
+            SQL_MOV, SQL_DEVOLUCOES, SQL_FILIAL, SQL_CLIENTES, 
+            SQL_ESTOQUE, SQL_PRODUTOS_UNICOS, SQL_ENTRADA_PRODUTOS
+        )
         from aurora_iqvia.utils import only_digits, md5_bytes, beautify_json, daterange
         from aurora_iqvia.iqvia_api import get_token, upload_zip
         from aurora_iqvia.validator import validate_payload, load_spec
@@ -57,11 +63,70 @@ def format_telefone(telefone: str) -> str:
         return f"{ddd}-{numero}"
     return digits
 
+def clean_text(text: str) -> str:
+    """Remove caracteres especiais problemáticos mantendo acentos válidos"""
+    if not text:
+        return ""
+    
+    # Converter para string e fazer strip
+    text = str(text).strip()
+    
+    # Primeira tentativa: corrigir encoding comum
+    try:
+        # Se está como bytes mal decodificados
+        if '�' in text or any(ord(c) > 1000 for c in text if len(text) > 0):
+            # Tentar recodificar
+            text_bytes = text.encode('latin1', errors='ignore')
+            text = text_bytes.decode('utf-8', errors='ignore')
+    except:
+        pass
+    
+    # Segunda tentativa: substituições diretas para casos comuns
+    replacements = {
+        'SÃ£O': 'SÃO',
+        'SÃƒO': 'SÃO', 
+        'SÃ\x83O': 'SÃO',
+        'Ã ': 'À',
+        'Ã¡': 'á',
+        'Ã¢': 'â', 
+        'Ã£': 'ã',
+        'Ã¤': 'ä',
+        'Ã§': 'ç',
+        'Ã©': 'é',
+        'Ãª': 'ê',
+        'Ã­': 'í',
+        'Ã³': 'ó',
+        'Ã´': 'ô',
+        'Ãµ': 'õ',
+        'Ãº': 'ú',
+        'Ã¼': 'ü',
+        'Ã±': 'ñ',
+        # Casos específicos problemáticos
+        'SÃƒâ€šÃ‚Â£O': 'SÃO',
+        'SÃƒÂ£O': 'SÃO'
+    }
+    
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    
+    # Terceira tentativa: normalização usando unidecode se disponível
+    try:
+        import unicodedata
+        # Normalizar para remover caracteres compostos problemáticos
+        text = unicodedata.normalize('NFKC', text)
+    except:
+        pass
+    
+    return text
+
 def validate_field_length(value: str, max_length: int, field_name: str = "") -> str:
-    """Valida tamanho máximo dos campos"""
+    """Valida tamanho máximo dos campos com limpeza de caracteres"""
     if not value:
         return ""
-    value_str = str(value).strip()
+    
+    # Limpar texto primeiro
+    value_str = clean_text(value)
+    
     if len(value_str) > max_length:
         return value_str[:max_length]
     return value_str
@@ -185,11 +250,17 @@ def build_payload(mov, dev, fil, cli, est, produtos_unicos, dados_entrada, data_
             "tipoPagto": 7,  # 7 = Outros (padrão)
             "preco": {
                 "valor": {"liquido": preco_para_json, "bruto": preco_para_json},
-                "icms": {"isento": 0,
-                         "aliq": round(float(getattr(r, "PERCICM", 0.0) or 0.0), 2),
-                         "valor": round(float(getattr(r, "VLICMS", 0.0) or 0.0), 2),
-                         "cst": str(getattr(r, "SITTRIBUT", "60") or "60"),
-                         "subsTrib":{"valor": 0, "embutidoPreco": 0, "cest": "0"}}  # int, não float
+                "icms": {
+                    "isento": 0,
+                    "aliq": round(float(getattr(r, "PERCICM", 0.0) or 0.0), 2),
+                    "valor": round(float(getattr(r, "VLICMS", 0.0) or 0.0), 2),
+                    "cst": str(getattr(r, "SITTRIBUT", "60") or "60"),
+                    "subsTrib": {
+                        "valor": 0, 
+                        "embutidoPreco": 0, 
+                        "cest": "0"
+                    }
+                }
             }
         }
         
@@ -228,11 +299,17 @@ def build_payload(mov, dev, fil, cli, est, produtos_unicos, dados_entrada, data_
             "tipoPagto": 7,
             "preco": {
                 "valor": {"liquido": vl_unit, "bruto": vl_unit},
-                "icms": {"isento": 0,
-                         "aliq": round(float(getattr(r, "PERCICM", 0.0) or 0.0), 2),
-                         "valor": round(float(getattr(r, "VLICMS", 0.0) or 0.0), 2),
-                         "cst": str(getattr(r, "SITTRIBUT", "60") or "60"),
-                         "subsTrib":{"valor": 0, "embutidoPreco": 0, "cest": "0"}}  # int, não float
+                "icms": {
+                    "isento": 0,
+                    "aliq": round(float(getattr(r, "PERCICM", 0.0) or 0.0), 2),
+                    "valor": round(float(getattr(r, "VLICMS", 0.0) or 0.0), 2),
+                    "cst": str(getattr(r, "SITTRIBUT", "60") or "60"),
+                    "subsTrib": {
+                        "valor": 0, 
+                        "embutidoPreco": 0, 
+                        "cest": "0"
+                    }
+                }
             }
         })
 
@@ -412,6 +489,20 @@ def run_period(cfg: AppConfig, d0, d1, upload: bool, logger, validate: bool=Fals
         except Exception:
             pass
 
+def debug_encoding_issues(text: str) -> str:
+    """Função de debug para identificar problemas de encoding"""
+    if not text:
+        return ""
+    
+    print(f"🔍 Debug: Texto original: '{text}'")
+    print(f"🔍 Debug: Bytes: {[hex(ord(c)) for c in text[:20]]}")
+    
+    # Tentar diferentes correções
+    corrected = clean_text(text)
+    print(f"🔍 Debug: Texto corrigido: '{corrected}'")
+    
+    return corrected
+
 # Código de teste/exemplo quando executado diretamente
 if __name__ == "__main__":
     print("Controller IQVIA - Teste de Importação")
@@ -431,7 +522,27 @@ if __name__ == "__main__":
         print(f"format_telefone('11987654321'): {format_telefone('11987654321')}")
         print(f"validate_field_length('Texto muito longo', 10): {validate_field_length('Texto muito longo', 10)}")
         
+        # Teste de encoding
+        print("\n🧪 Testando correção de encoding:")
+        test_texts = [
+            "SÃO LEOPOLDO",
+            "SÃƒO PAULO", 
+            "JOSÉ MARIA",
+            "JOÃO PESSOA"
+        ]
+        
+        for test_text in test_texts:
+            cleaned = clean_text(test_text)
+            print(f"'{test_text}' → '{cleaned}'")
+        
         print("\n✅ Todas as funções estão funcionando corretamente!")
+        print("\n📋 Estrutura do projeto detectada:")
+        print("- DB: AppConfig e connect_oracle")
+        print("- SQL: Queries do SQL_PRISMA")
+        print("- Utils: Funções utilitárias")
+        print("- IQVIA API: Token e upload")
+        print("- Validator: Validação de layout")
+        print("- Encoding: Correção automática de caracteres")
         
     except Exception as e:
         print(f"❌ Erro: {e}")
