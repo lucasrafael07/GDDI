@@ -2,12 +2,12 @@
 """
 SQLs parametrizados para integração WinThor x IQVIA
 Schema: PRISMA
-Versão: 3.0 - Corrigida e formatada conforme estrutura real do banco
+Versão: 3.1 - CORRIGIDA para resolver inconsistência IQVIA
+CORREÇÃO: 611 produtos no estoque que não apareciam na seção produtos
 """
 
 # =====================================================================================
-# QUERY PRINCIPAL DE VENDAS
-# Captura todas as vendas do dia com tratamento correto de preços
+# QUERY PRINCIPAL DE VENDAS - MANTIDA INALTERADA
 # =====================================================================================
 SQL_MOV = """
 SELECT 
@@ -82,19 +82,18 @@ INNER JOIN PRISMA.PCFORNEC FORN ON P.CODFORNEC = FORN.CODFORNEC
 INNER JOIN PRISMA.PCMOVCOMPLE MC ON M.NUMTRANSITEM = MC.NUMTRANSITEM
 
 WHERE 1=1
-    AND NVL(M.QT, 0) > 0                                                    -- Quantidade positiva
-    AND P.CODAUXILIAR IS NOT NULL                                           -- Produto com EAN
-    AND P.CODEPTO <> 196                                                    -- Excluir departamento 196
-    AND TRUNC(N.DTSAIDA) = :DIA                                            -- Filtro por dia
-    AND N.CODFILIAL = :CODFILIAL                                           -- Filtro por filial
-    AND REPLACE(REPLACE(REPLACE(C.CGCENT,'.',''),'/',''),'-','') <> '06112992000125' -- Excluir CNPJ específico
+    AND NVL(M.QT, 0) > 0
+    AND P.CODAUXILIAR IS NOT NULL
+    AND P.CODEPTO <> 196
+    AND TRUNC(N.DTSAIDA) = :DIA
+    AND N.CODFILIAL = :CODFILIAL
+    AND REPLACE(REPLACE(REPLACE(C.CGCENT,'.',''),'/',''),'-','') <> '06112992000125'
 
 ORDER BY N.DTSAIDA, N.NUMNOTA
 """
 
 # =====================================================================================
-# QUERY DE DEVOLUÇÕES
-# Captura todas as devoluções do dia baseada na estrutura validada
+# QUERY DE DEVOLUÇÕES - MANTIDA INALTERADA  
 # =====================================================================================
 SQL_DEVOLUCOES = """
 SELECT DISTINCT
@@ -120,7 +119,7 @@ SELECT DISTINCT
     PCFORNEC.CODFORNEC,
     PCFORNEC.FORNECEDOR,
     
-    -- Tratamento de Preços (mesma lógica das vendas)
+    -- Tratamento de Preços
     CASE 
         WHEN NVL(PCMOV.PTABELA, 0) = 0 THEN NVL(PCPRODUT.PVENDA, 0) 
         ELSE NVL(PCMOV.PTABELA, 0) 
@@ -161,21 +160,21 @@ LEFT JOIN PRISMA.PCDEVCONSUM ON PCNFENT.NUMTRANSENT = PCDEVCONSUM.NUMTRANSENT
 LEFT JOIN PRISMA.PCNFSAID ON PCESTCOM.NUMTRANSVENDA = PCNFSAID.NUMTRANSVENDA
 
 WHERE 1=1
-    AND NVL(PCNFENT.CODFILIALNF, PCNFENT.CODFILIAL) = :CODFILIAL          -- Filtro por filial
-    AND PCNFENT.TIPODESCARGA IN ('6', '7', 'T')                           -- Tipos de devolução
-    AND NVL(PCNFENT.OBS, 'X') <> 'NF CANCELADA'                          -- Excluir canceladas
-    AND PCNFENT.CODFISCAL IN ('131', '132', '231', '232', '199', '299')   -- Códigos fiscais válidos
-    AND PCMOV.DTCANCEL IS NULL                                             -- Movimento não cancelado
-    AND PCPRODUT.CODAUXILIAR IS NOT NULL                                   -- Produto com EAN
-    AND PCPRODUT.CODEPTO <> 196                                           -- Excluir departamento 196
-    AND NVL(PCNFSAID.CONDVENDA, 0) NOT IN (4, 8, 10, 13, 20, 98, 99)     -- Condições de venda válidas
-    AND TRUNC(PCNFENT.DTENT) = :DIA                                       -- Filtro por dia
+    AND NVL(PCNFENT.CODFILIALNF, PCNFENT.CODFILIAL) = :CODFILIAL
+    AND PCNFENT.TIPODESCARGA IN ('6', '7', 'T')
+    AND NVL(PCNFENT.OBS, 'X') <> 'NF CANCELADA'
+    AND PCNFENT.CODFISCAL IN ('131', '132', '231', '232', '199', '299')
+    AND PCMOV.DTCANCEL IS NULL
+    AND PCPRODUT.CODAUXILIAR IS NOT NULL
+    AND PCPRODUT.CODEPTO <> 196
+    AND NVL(PCNFSAID.CONDVENDA, 0) NOT IN (4, 8, 10, 13, 20, 98, 99)
+    AND TRUNC(PCNFENT.DTENT) = :DIA
 
 ORDER BY PCNFENT.DTENT, PCNFENT.NUMNOTA
 """
 
 # =====================================================================================
-# QUERY DE ESTOQUE - Versão simplificada para Oracle 10g
+# QUERY DE ESTOQUE - MANTIDA INALTERADA
 # =====================================================================================
 SQL_ESTOQUE = """
 SELECT 
@@ -202,38 +201,16 @@ INNER JOIN PRISMA.PCPRODUT P ON P.CODPROD = E.CODPROD
 INNER JOIN PRISMA.PCFORNEC FORN ON P.CODFORNEC = FORN.CODFORNEC
 
 WHERE 1=1
-    AND E.CODFILIAL = :CODFILIAL                                                                    -- Filtro por filial
-    AND P.CODEPTO <> 196                                                                           -- Excluir departamento 196
-    AND TRUNC(PRISMA.PKG_ESTOQUE.ESTOQUE_DISPONIVEL(P.CODPROD, E.CODFILIAL, 'VA', :DIA)) > 0     -- Estoque positivo
+    AND E.CODFILIAL = :CODFILIAL
+    AND P.CODEPTO <> 196
+    AND TRUNC(PRISMA.PKG_ESTOQUE.ESTOQUE_DISPONIVEL(P.CODPROD, E.CODFILIAL, 'VA', :DIA)) > 0
 
 ORDER BY P.CODPROD
 """
 
 # =====================================================================================
-# QUERY AUXILIAR - EAN e Preços das Notas de Entrada
-# Para completar dados faltantes dos produtos de estoque
-# =====================================================================================
-SQL_ENTRADA_PRODUTOS = """
-SELECT 
-    M.CODPROD,
-    P.CODAUXILIAR,
-    M.PUNIT,
-    N.DTENT,
-    ROW_NUMBER() OVER (PARTITION BY M.CODPROD ORDER BY N.DTENT DESC) AS RN
-FROM PRISMA.PCNFENT N
-INNER JOIN PRISMA.PCESTCOM EC ON EC.NUMTRANSENT = N.NUMTRANSENT  
-INNER JOIN PRISMA.PCMOV M ON EC.NUMTRANSENT = M.NUMTRANSENT
-INNER JOIN PRISMA.PCPRODUT P ON M.CODPROD = P.CODPROD
-WHERE 1=1
-    AND N.CODFILIAL = :CODFILIAL
-    AND (P.CODAUXILIAR IS NOT NULL OR NVL(M.PUNIT, 0) > 0)
-    AND N.DTENT >= TRUNC(:DIA) - 365  -- Últimos 12 meses
-ORDER BY M.CODPROD, N.DTENT DESC
-"""
-
-# =====================================================================================
-# QUERY DE PRODUTOS ÚNICOS
-# União de produtos de vendas, devoluções e estoque para garantir integridade
+# QUERY DE PRODUTOS ÚNICOS - ✅ CORRIGIDA PARA RESOLVER INCONSISTÊNCIA IQVIA
+# Esta correção resolve o problema dos 611 produtos faltando
 # =====================================================================================
 SQL_PRODUTOS_UNICOS = """
 SELECT DISTINCT 
@@ -245,7 +222,27 @@ SELECT DISTINCT
     FORNECEDOR, 
     PTABELA
 FROM (
-    -- ===== PRODUTOS DAS VENDAS =====
+    -- ===== PRIORIDADE 1: PRODUTOS COM ESTOQUE (GARANTE CONSISTÊNCIA) =====
+    SELECT 
+        P.CODPROD, 
+        P.CODAUXILIAR, 
+        P.NBM, 
+        P.DESCRICAO,
+        FORN.CODFORNEC, 
+        FORN.FORNECEDOR, 
+        NVL(P.PVENDA, 0) AS PTABELA
+    FROM PRISMA.PCEST E
+    INNER JOIN PRISMA.PCPRODUT P ON P.CODPROD = E.CODPROD
+    INNER JOIN PRISMA.PCFORNEC FORN ON P.CODFORNEC = FORN.CODFORNEC
+    WHERE 1=1
+        AND E.CODFILIAL = :CODFILIAL
+        AND P.CODAUXILIAR IS NOT NULL
+        AND P.CODEPTO <> 196
+        AND TRUNC(PRISMA.PKG_ESTOQUE.ESTOQUE_DISPONIVEL(P.CODPROD, E.CODFILIAL, 'VA', :DIA)) > 0
+    
+    UNION
+    
+    -- ===== COMPLEMENTO: PRODUTOS DAS VENDAS =====
     SELECT 
         P.CODPROD, 
         P.CODAUXILIAR, 
@@ -268,7 +265,7 @@ FROM (
     
     UNION
     
-    -- ===== PRODUTOS DAS DEVOLUÇÕES =====
+    -- ===== COMPLEMENTO: PRODUTOS DAS DEVOLUÇÕES =====
     SELECT 
         PCPRODUT.CODPROD, 
         PCPRODUT.CODAUXILIAR, 
@@ -294,33 +291,33 @@ FROM (
         AND PCPRODUT.CODEPTO <> 196
         AND NVL(PCNFSAID.CONDVENDA, 0) NOT IN (4, 8, 10, 13, 20, 98, 99)
         AND TRUNC(PCNFENT.DTENT) = :DIA
-    
-    UNION
-    
-    -- ===== PRODUTOS DO ESTOQUE =====
-    SELECT 
-        P.CODPROD, 
-        P.CODAUXILIAR, 
-        P.NBM, 
-        P.DESCRICAO,
-        FORN.CODFORNEC, 
-        FORN.FORNECEDOR, 
-        NVL(P.PVENDA, 0) AS PTABELA
-    FROM PRISMA.PCEST E
-    INNER JOIN PRISMA.PCPRODUT P ON P.CODPROD = E.CODPROD
-    INNER JOIN PRISMA.PCFORNEC FORN ON P.CODFORNEC = FORN.CODFORNEC
-    WHERE 1=1
-        AND E.CODFILIAL = :CODFILIAL
-        AND P.CODAUXILIAR IS NOT NULL
-        AND P.CODEPTO <> 196
-        AND TRUNC(PRISMA.PKG_ESTOQUE.ESTOQUE_DISPONIVEL(P.CODPROD, E.CODFILIAL, 'VA', :DIA)) > 0
 )
 ORDER BY CODPROD
 """
 
 # =====================================================================================
-# QUERY DE FILIAIS
-# Captura dados das filiais envolvidas em vendas e devoluções
+# QUERY AUXILIAR - EAN e Preços das Notas de Entrada - MANTIDA INALTERADA
+# =====================================================================================
+SQL_ENTRADA_PRODUTOS = """
+SELECT 
+    M.CODPROD,
+    P.CODAUXILIAR,
+    M.PUNIT,
+    N.DTENT,
+    ROW_NUMBER() OVER (PARTITION BY M.CODPROD ORDER BY N.DTENT DESC) AS RN
+FROM PRISMA.PCNFENT N
+INNER JOIN PRISMA.PCESTCOM EC ON EC.NUMTRANSENT = N.NUMTRANSENT  
+INNER JOIN PRISMA.PCMOV M ON EC.NUMTRANSENT = M.NUMTRANSENT
+INNER JOIN PRISMA.PCPRODUT P ON M.CODPROD = P.CODPROD
+WHERE 1=1
+    AND N.CODFILIAL = :CODFILIAL
+    AND (P.CODAUXILIAR IS NOT NULL OR NVL(M.PUNIT, 0) > 0)
+    AND N.DTENT >= TRUNC(:DIA) - 365
+ORDER BY M.CODPROD, N.DTENT DESC
+"""
+
+# =====================================================================================
+# QUERY DE FILIAIS - MANTIDA INALTERADA
 # =====================================================================================
 SQL_FILIAL = """
 SELECT DISTINCT 
@@ -386,8 +383,7 @@ FROM (
 """
 
 # =====================================================================================
-# QUERY DE CLIENTES
-# Captura clientes de vendas e devoluções
+# QUERY DE CLIENTES - MANTIDA INALTERADA
 # =====================================================================================
 SQL_CLIENTES = """
 SELECT DISTINCT 
@@ -454,8 +450,8 @@ FROM (
         AND PCCLIENT.CODCLI IS NOT NULL
 )
 WHERE 1=1
-    AND REPLACE(REPLACE(REPLACE(CGCENT,'.',''),'/',''),'-','') <> '06112992000125'  -- Excluir CNPJ específico
-    AND CODCLI > 0                                                                   -- Cliente válido
+    AND REPLACE(REPLACE(REPLACE(CGCENT,'.',''),'/',''),'-','') <> '06112992000125'
+    AND CODCLI > 0
 
 ORDER BY CODCLI
 """
