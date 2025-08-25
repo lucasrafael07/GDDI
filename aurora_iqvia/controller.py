@@ -118,18 +118,12 @@ def build_payload(
             "tipoCaptacaoPrescricao": 0,
             "ender": {
                 "descr": validate_field_length(getattr(r, "ENDERECOFILIAL", "") or "", 70),
-                "num": validate_field_length(str(getattr(r, "NUMERO", "0") or "0"), 8),
+                "compl": "",  # ✅ CORRIGIDO: campo oficial, removido "num"
                 "cep": format_cep(getattr(r, "CEP", "") or ""),
                 "cidade": validate_field_length(getattr(r, "CIDADE", "") or "", 40) if hasattr(r, "CIDADE") else validate_field_length(getattr(r, "MUNICIPIO", "") or "", 40),
                 "uf": validate_field_length(getattr(r, "UF", "") or "", 2),
                 "tel": tel_fil,  # exigido pelo layout
             },
-            # Campo extra não deve quebrar validação
-            "contato": {
-                "tel": tel_fil,
-                "email": validate_field_length(getattr(r, "EMAIL", "") or "", 60)
-            },
-            "inscEstadual": validate_field_length(getattr(r, "INSCESTADUAL", "") or "", 20),
             "codIqvia": validate_field_length(str(codiqvia), 10)
         })
 
@@ -154,13 +148,12 @@ def build_payload(
             "profSaude": int(prof_saude),
             "ender": {
                 "descr": validate_field_length(getattr(r, "ENDERECOCLI", "") or "", 70),
-                "num": "0",
+                "compl": "",  # ✅ CORRIGIDO: campo oficial
                 "cep": format_cep(getattr(r, "CEPENT", "") or ""),
                 "cidade": validate_field_length(getattr(r, "MUNICENT", "") or "", 40),
                 "uf": validate_field_length(getattr(r, "ESTENT", "") or "", 2),
                 "tel": tel_cli,  # exigido pelo layout
-            },
-            "contato": {"tel": tel_cli, "email": ""},
+            }
         })
 
     # -------- Produtos --------
@@ -187,14 +180,14 @@ def build_payload(
                 "apresent": validate_field_length(getattr(r, "DESCRICAO", "") or "", 70),
                 "fabr": validate_field_length(getattr(r, "FORNECEDOR", "") or "", 40),
                 "precoFabrica": round(preco_final, 2),
-                # Cosméticos: não se aplica
+                # Cosméticos: não se aplica (strings conforme validador)
                 "dispViaFarmaciaPopular": "0",
-                "dispViaPbm": "0",
+                "dispViaPbm": "0", 
                 "marcaPropria": "0"
             })
 
     # -------- Vendas (apenas MOV) + brindes + campos extras de NF/pagto --------
-    logger("...dados de vendas (incluindo brindes)")
+    logger("...dados de vendas (incluindo brindes) - VERSÃO CORRIGIDA")
     vendas: List[Dict[str, Any]] = []
     for r in mov.itertuples(index=False):
         dt_s = r.DTSAIDA.strftime("%Y-%m-%d") if hasattr(r, "DTSAIDA") and hasattr(r.DTSAIDA, "strftime") else str(getattr(r, "DTSAIDA", ""))[:10]
@@ -205,14 +198,13 @@ def build_payload(
         if eh_brinde and vl_unit == 0.0:
             preco_para_json = round(float(getattr(r, "PTABELA", 0.0) or 0.0), 2)
 
-        # Campos extras conforme exemplo do layout/arquivo de terceiros
-        # docTipo: 2 quando tem CHAVENFE (NF-e); 0 caso contrário
+        # ✅ Campos extras corrigidos
         doc_tipo = 2 if (getattr(r, "CHAVENFE", None) not in (None, "", 0)) else 0
-        doc_serie = int(getattr(r, "SERIE", 0) or 0)
+        doc_serie = str(int(getattr(r, "SERIE", 0) or 0))  # ✅ CORRIGIDO: STRING
         doc_num = int(getattr(r, "NUMNOTA", 0) or 0)
         danfe = str(getattr(r, "CHAVENFE", "") or "")
         venda_judic = 0
-        tipo_pagto = 0  # ajuste depois se mapear formas de pagamento do WinThor
+        tipo_pagto = 0
 
         venda = {
             "codEstab": validate_field_length(str(r.CODFILIAL), 14),
@@ -226,30 +218,32 @@ def build_payload(
             "qt": int(getattr(r, "QT", 0) or 0),
             "ecommerce": 0,
             "meio": 5,  # 5 = Balcão (ajuste se necessário)
-            # Campos extras de documento e pagamento:
+            # ✅ Campos de documento corrigidos:
             "docTipo": doc_tipo,
-            "docFiscalSerie": doc_serie,
+            "docFiscalSerie": doc_serie,     # ✅ STRING
             "docFiscalNum": doc_num,
             "danfe": danfe,
             "vendaJudic": venda_judic,
             "tipoPagto": tipo_pagto,
-            # Preços e impostos
+            # ✅ ESTRUTURA DE PREÇO CORRIGIDA
             "preco": {
-                "liquido": preco_para_json,
-                "bruto": preco_para_json
-            },
-            "icms": {
-                "isento": 0,
-                "aliq": round(float(getattr(r, "PERCICM", 0.0) or 0.0), 2),
-                "valor": round(float(getattr(r, "VLICMS", 0.0) or 0.0), 2),
-                "cst": str(getattr(r, "SITTRIBUT", "60") or "60"),
-                "subsTrib": {"valor": 0, "embutidoPreco": 0, "cest": "0"}
+                "valor": {                   # ✅ OBRIGATÓRIO - estava ausente
+                    "liquido": preco_para_json,
+                    "bruto": preco_para_json
+                },
+                "icms": {                    # ✅ DENTRO DE preco - estava fora
+                    "isento": 0,
+                    "aliq": round(float(getattr(r, "PERCICM", 0.0) or 0.0), 2),
+                    "valor": round(float(getattr(r, "VLICMS", 0.0) or 0.0), 2),
+                    "cst": str(getattr(r, "SITTRIBUT", "60") or "60"),
+                    "subsTrib": {"valor": 0, "embutidoPreco": 0, "cest": "0"}
+                }
             }
         }
 
-        # Se for brinde, aplica desconto tipo 12 (100%)
+        # ✅ Se for brinde, aplica desconto DENTRO de preco
         if eh_brinde:
-            venda["desconto"] = {
+            venda["preco"]["desconto"] = {
                 "paraConsumidorFinal": 12,
                 "perc": 100.00,
                 "valor": preco_para_json
@@ -291,6 +285,7 @@ def build_payload(
                 "qt": int(getattr(r, "ESTOQUEATUAL", 0) or 0)
             })
 
+    # ✅ PAYLOAD COMPLETO COM SEÇÕES OBRIGATÓRIAS MÍNIMAS
     payload = {
         "data": data_arquivo.strftime("%Y-%m-%d"),
         "estabelecimentos": estabs,
@@ -298,7 +293,16 @@ def build_payload(
         "produtos": produtos,
         "vendas": vendas,
         "vendasDevolucoesCancelamentos": vendas_devolucoes,
-        "estoque": estoque
+        "estoque": estoque,
+        # ✅ SEÇÕES VAZIAS MAS OBRIGATÓRIAS (evita erro na IQVIA)
+        "profissionaisSaude": [],
+        "pacientes": [],
+        "fornecedores": [],
+        "planosSaude": [],
+        "laboratoriosPBM": [],
+        "compras": [],
+        "comprasDevolucoesCancelamentos": [],
+        "prescricoes": []
     }
     return payload
 
