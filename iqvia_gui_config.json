@@ -13,10 +13,10 @@
   "codfilial": 1,
   "codiqvia": "0892",
   "out_dir": "C:/Python/GDDI/send",
-  "last_ini": "30/07/2025",
+  "last_ini": "01/07/2025",
   "last_fim": "31/07/2025",
   "theme": "darkly",
-  "upload_default": false,
+  "upload_default": true,
   "validation_enabled": true,
   "layout_example_path": ""
 }

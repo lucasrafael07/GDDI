@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 from ttkbootstrap.widgets import DateEntry
@@ -71,7 +71,7 @@ class App(tb.Window):
         self.dt_fim.pack(side=LEFT, padx=6)
 
         self.var_upload = tb.BooleanVar(value=self.cfg.upload_default)
-        tb.Checkbutton(r1, text="Enviar para a IQVIA após zipar", variable=self.var_upload,
+        tb.Checkbutton(r1, text="Enviar para IQVIA após processar", variable=self.var_upload,
                        bootstyle="success-round-toggle").pack(side=LEFT, padx=12)
 
         r2 = tb.Frame(self.tab_run)
@@ -83,7 +83,7 @@ class App(tb.Window):
 
         r3 = tb.Frame(self.tab_run)
         r3.pack(fill=X, pady=6)
-        tb.Button(r3, text="Gerar agora", command=self._on_generate, bootstyle="success").pack(side=LEFT)
+        tb.Button(r3, text="Processar", command=self._on_generate, bootstyle="success").pack(side=LEFT)
         tb.Button(r3, text="Testar conexão Oracle", command=self._test_conn, bootstyle="secondary").pack(side=LEFT, padx=6)
         tb.Button(r3, text="Testar comunicação IQVIA", command=self._test_iqvia, bootstyle="info").pack(side=LEFT, padx=6)
         tb.Button(r3, text="Abrir saída", command=self._open_out, bootstyle="secondary-outline").pack(side=LEFT, padx=6)
@@ -149,6 +149,7 @@ class App(tb.Window):
         tm2.pack(fill=X, pady=4)
         tb.Label(tm2, text="Histórico de uploads recentes:").pack(side=LEFT, padx=(6,6))
         tb.Button(tm2, text="Carregar", command=self._load_recent_uploads, bootstyle="secondary").pack(side=LEFT, padx=6)
+        tb.Button(tm2, text="Exportar Relatório", command=self._export_upload_report, bootstyle="info-outline").pack(side=LEFT, padx=6)
 
         self.monitor_txt = ScrolledText(tm, height=26)
         self.monitor_txt.pack(fill=BOTH, expand=YES, pady=(6,4))
@@ -157,7 +158,26 @@ class App(tb.Window):
         sa = self.tab_about
         tb.Label(sa, text="GDDI – Gerador de dados IQVIA", font=("Segoe UI", 14, "bold")).pack(pady=(4,2))
         tb.Label(sa, text="by Aurora Business Intelligence", font=("Segoe UI", 10)).pack()
-        tb.Label(sa, text="Função: extrair dados do WinThor (Oracle), montar JSON diário no layout IQVIA, zipar e enviar (opcional).", wraplength=900, justify=LEFT).pack(pady=6)
+        
+        # Texto atualizado sobre o funcionamento
+        about_text = """
+Função: extrair dados do WinThor (Oracle), montar JSON diário no layout IQVIA, zipar e enviar.
+
+📊 FLUXO DE PROCESSAMENTO:
+1. Conecta ao Oracle uma única vez
+2. Para cada dia do período:
+   - Extrai dados do banco
+   - Gera JSON no formato IQVIA
+   - Valida estrutura (opcional)
+   - Salva JSON local
+   - Cria ZIP
+   - Envia para IQVIA (se habilitado)
+   - Salva histórico do upload
+3. Exibe resumo final com estatísticas
+        """
+        
+        tb.Label(sa, text=about_text.strip(), wraplength=900, justify=LEFT, font=("Segoe UI", 9)).pack(pady=6)
+        
         def _open_doc():
             import webbrowser; webbrowser.open("https://dataentry.solutions.iqvia.com/doc/")
         tb.Button(sa, text="Abrir documentação oficial da IQVIA", command=_open_doc, bootstyle="info-outline").pack(pady=4)
@@ -270,8 +290,9 @@ class App(tb.Window):
     def _on_generate(self):
         self._save_cfg()
         self.txt.delete("1.0", END)
-        self._log("Integração Winthor x Iqvia.")
-        self._log("Aguardando Execução...")
+        self._log("🔄 Iniciando processamento IQVIA")
+        self._log("⏳ Preparando execução...")
+        
         try:
             d0 = parse_br_date(self.dt_ini.entry.get().strip())
             d1 = parse_br_date(self.dt_fim.entry.get().strip())
@@ -279,12 +300,24 @@ class App(tb.Window):
             messagebox.showerror("Erro", "Datas inválidas. Use o calendário (dd/mm/aaaa).")
             return
 
-        def logger(m): self._log(m)
+        # Calcular total de dias para progress bar
+        total_days = (d1 - d0).days + 1
+        self.pbar.configure(maximum=total_days, value=0)
+
+        def logger(m): 
+            self._log(m)
+            # Simples atualização da progress bar baseada no texto de log
+            if "concluído" in m:
+                current = self.pbar.cget("value")
+                self.pbar.configure(value=current + 1)
+        
         try:
             run_period(self.cfg, d0, d1, upload=bool(self.var_upload.get()), logger=logger,
                        validate=bool(self.val_enabled.get()), example_layout=self.layout_path_var.get().strip())
         except Exception as e:
             self._log("❌ ERRO: " + str(e))
+        finally:
+            self.pbar.configure(value=total_days)  # Completar barra
 
     def _on_close(self):
         try:
@@ -292,7 +325,7 @@ class App(tb.Window):
         finally:
             self.destroy()
 
-    # --- Novas funções implementadas ---
+    # --- Funções implementadas ---
     
     def _preview_json(self):
         """Mostra visualização prévia do JSON para um dia selecionado"""
@@ -461,7 +494,6 @@ class App(tb.Window):
                 pass
         
         # Adicionar novo registro
-        from datetime import datetime
         history[guid] = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "status": status
@@ -498,15 +530,114 @@ class App(tb.Window):
                 timestamp = entry.get("timestamp", "Data desconhecida")
                 status_data = entry.get("status", {})
                 status = status_data.get("status", "Desconhecido")
+                date_info = entry.get("date", "Data desconhecida")
+                file_info = entry.get("file", "Arquivo desconhecido")
                 
-                self.monitor_txt.insert(END, f"GUID: {guid}\n")
-                self.monitor_txt.insert(END, f"Data: {timestamp}\n")
-                self.monitor_txt.insert(END, f"Status: {status}\n")
-                self.monitor_txt.insert(END, "-" * 50 + "\n")
+                self.monitor_txt.insert(END, f"📅 Data: {date_info}\n")
+                self.monitor_txt.insert(END, f"📁 Arquivo: {file_info}\n")
+                self.monitor_txt.insert(END, f"🔗 GUID: {guid}\n")
+                self.monitor_txt.insert(END, f"📊 Status: {status}\n")
+                self.monitor_txt.insert(END, f"⏰ Upload: {timestamp}\n")
+                self.monitor_txt.insert(END, "-" * 60 + "\n")
             
         except Exception as e:
             self.monitor_txt.delete(1.0, END)
             self.monitor_txt.insert(END, f"❌ Erro ao carregar histórico: {str(e)}\n")
+    
+    def _export_upload_report(self):
+        """Exporta relatório detalhado de uploads"""
+        history_dir = Path(self.cfg.out_dir) / "history"
+        history_file = history_dir / "upload_history.json"
+        
+        if not history_file.exists():
+            messagebox.showwarning("Aviso", "Nenhum histórico de uploads encontrado para exportar.")
+            return
+        
+        try:
+            # Selecionar arquivo de destino
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("JSON files", "*.json"), ("All files", "*.*")],
+                title="Exportar relatório de uploads"
+            )
+            
+            if not filename:
+                return
+            
+            history = json.loads(history_file.read_text(encoding="utf-8"))
+            
+            # Gerar relatório
+            report_lines = []
+            report_lines.append("=" * 80)
+            report_lines.append("RELATÓRIO DE UPLOADS IQVIA")
+            report_lines.append("=" * 80)
+            report_lines.append(f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+            report_lines.append(f"Total de uploads: {len(history)}")
+            report_lines.append("")
+            
+            # Estatísticas
+            status_count = {}
+            for entry in history.values():
+                status = entry.get("status", {}).get("status", "Desconhecido")
+                status_count[status] = status_count.get(status, 0) + 1
+            
+            report_lines.append("ESTATÍSTICAS:")
+            for status, count in status_count.items():
+                report_lines.append(f"  {status}: {count}")
+            report_lines.append("")
+            
+            # Detalhes por upload
+            report_lines.append("DETALHES DOS UPLOADS:")
+            report_lines.append("-" * 80)
+            
+            # Ordenar por timestamp
+            sorted_guids = sorted(
+                history.keys(),
+                key=lambda k: history[k].get("timestamp", ""),
+                reverse=True
+            )
+            
+            for guid in sorted_guids:
+                entry = history[guid]
+                timestamp = entry.get("timestamp", "Data desconhecida")
+                status_data = entry.get("status", {})
+                status = status_data.get("status", "Desconhecido")
+                date_info = entry.get("date", "Data desconhecida")
+                file_info = entry.get("file", "Arquivo desconhecido")
+                size_info = entry.get("size", "Tamanho desconhecido")
+                md5_info = entry.get("md5", "MD5 não disponível")
+                
+                report_lines.append(f"Data do arquivo: {date_info}")
+                report_lines.append(f"Arquivo: {file_info}")
+                report_lines.append(f"GUID: {guid}")
+                report_lines.append(f"Status: {status}")
+                report_lines.append(f"Timestamp: {timestamp}")
+                report_lines.append(f"Tamanho: {size_info} bytes" if isinstance(size_info, int) else f"Tamanho: {size_info}")
+                report_lines.append(f"MD5: {md5_info}")
+                
+                # Informações adicionais do status
+                if isinstance(status_data, dict):
+                    for key, value in status_data.items():
+                        if key not in ['status', 'md5'] and value:
+                            report_lines.append(f"{key.title()}: {value}")
+                
+                report_lines.append("-" * 40)
+            
+            # Salvar relatório
+            if filename.endswith('.json'):
+                # Exportar como JSON
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(history, f, ensure_ascii=False, indent=2)
+            else:
+                # Exportar como texto
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(report_lines))
+            
+            messagebox.showinfo("Sucesso", f"Relatório exportado para:\n{filename}")
+            self._log(f"📊 Relatório de uploads exportado: {filename}")
+            
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao exportar relatório: {str(e)}")
     
     def _show_version_history(self, event=None):
         """Exibe o histórico de versões do layout"""

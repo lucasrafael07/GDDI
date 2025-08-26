@@ -290,7 +290,7 @@ def build_payload(
             })
 
     # -------- Vendas (apenas MOV) + brindes + campos extras de NF/pagto --------
-    logger("...dados de vendas (incluindo brindes) - VERSÃO CORRIGIDA")
+    logger("...dados de vendas")
     vendas: List[Dict[str, Any]] = []
     for r in mov.itertuples(index=False):
         dt_s = r.DTSAIDA.strftime("%Y-%m-%d") if hasattr(r, "DTSAIDA") and hasattr(r.DTSAIDA, "strftime") else str(getattr(r, "DTSAIDA", ""))[:10]
@@ -410,7 +410,7 @@ def build_payload(
     return payload
 
 # --------------------------
-# Persistência (JSON/ZIP) e execução de período
+# Funções modificadas para processamento diário
 # --------------------------
 def save_json(payload: Dict[str, Any], client_id: str, dia: date, out_dir: Path) -> Path:
     """
@@ -430,34 +430,73 @@ def save_json(payload: Dict[str, Any], client_id: str, dia: date, out_dir: Path)
     fp.write_text(beautify_json(payload), encoding="utf-8")
     return fp
 
-def zip_period(json_paths: List[Path], client_id: str, out_dir: Path):
+def create_daily_zip(json_path: Path, client_id: str, out_dir: Path) -> tuple[Path, str]:
     """
-    Cria arquivo ZIP com os JSONs do período.
+    Cria arquivo ZIP diário com um único JSON.
     
     Args:
-        json_paths: Lista de paths dos arquivos JSON
+        json_path: Path do arquivo JSON
         client_id: ID do cliente
         out_dir: Diretório de saída
         
     Returns:
         Tuple com path do zip e MD5 do conteúdo
     """
-    json_paths = sorted(json_paths, key=lambda p: p.name)
-    ini = json_paths[0].stem[-8:]
-    fim = json_paths[-1].stem[-8:]
-    zip_name = f"U_{client_id.upper()}_{ini}_{fim}.zip"
+    # Nome do ZIP deve ser igual ao JSON, apenas trocando extensão
+    zip_name = json_path.stem + ".zip"
     zip_path = out_dir / zip_name
+    
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        for p in json_paths:
-            z.write(p, arcname=p.name)
+        z.write(json_path, arcname=json_path.name)
+    
     buf.seek(0)
     zip_path.write_bytes(buf.getvalue())
     return zip_path, md5_bytes(buf.getvalue())
 
+def save_upload_history(guid: str, status: Dict[str, Any], zip_path: Path, dia: date, out_dir: Path):
+    """
+    Salva o histórico de upload de um arquivo específico.
+    
+    Args:
+        guid: GUID retornado pela IQVIA
+        status: Status completo retornado pela IQVIA
+        zip_path: Caminho do arquivo ZIP enviado
+        dia: Data do arquivo
+        out_dir: Diretório de saída
+    """
+    try:
+        history_dir = out_dir / "history"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        
+        history_file = history_dir / "upload_history.json"
+        
+        # Carregar histórico existente
+        history = {}
+        if history_file.exists():
+            try:
+                history = json.loads(history_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        
+        # Adicionar novo registro
+        history[guid] = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": status,
+            "file": zip_path.name,
+            "date": dia.strftime("%d/%m/%Y"),
+            "md5": status.get('md5', ''),
+            "size": zip_path.stat().st_size if zip_path.exists() else 0
+        }
+        
+        # Salvar histórico
+        history_file.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"⚠️ Erro ao salvar histórico: {str(e)}")
+
 def run_period(cfg: AppConfig, d0, d1, upload: bool, logger, validate: bool=False, example_layout: str=""):
     """
-    Executa processamento para um período de datas.
+    Executa processamento para um período de datas com envio diário.
     
     Args:
         cfg: Configuração da aplicação
@@ -475,12 +514,24 @@ def run_period(cfg: AppConfig, d0, d1, upload: bool, logger, validate: bool=Fals
     conn = connect_oracle(cfg)
     logger(f"✅ Conectado. DB version: {conn.version}")
 
+    # Obter token uma única vez se upload estiver habilitado
+    token = None
+    if upload:
+        logger("🌐 Autenticando na IQVIA...")
+        token = get_token(cfg.iqvia_token_url, cfg.iqvia_client_id, cfg.iqvia_client_secret, logger=logger)
+        if not token:
+            logger("❌ Falha ao obter token; upload será desabilitado para todos os dias.")
+            upload = False
+        else:
+            logger("✅ Token obtido com sucesso.")
+
     try:
-        json_paths: List[Path] = []
+        processed_count = 0
+        uploaded_count = 0
         spec = load_spec(example_layout) if validate else None
 
         for dia in daterange(d0, d1):
-            logger(f"📊 Processando dia {dia.strftime('%d/%m/%Y')}")
+            logger(f"\n📊 Processando dia {dia.strftime('%d/%m/%Y')}")
 
             logger("📄 Consultando movimentação de faturamento")
             mov = fetch_df(conn, SQL_MOV, DIA=dia, CODFILIAL=cfg.codfilial)
@@ -524,59 +575,44 @@ def run_period(cfg: AppConfig, d0, d1, upload: bool, logger, validate: bool=Fals
                     logger("✅ Payload válido segundo a spec")
 
             # Salvar JSON
-            fp = save_json(payload, cfg.iqvia_client_id, dia, out_dir)
-            logger(f"💾 JSON salvo: {fp.name}")
+            json_path = save_json(payload, cfg.iqvia_client_id, dia, out_dir)
+            logger(f"💾 JSON salvo: {json_path.name}")
 
-            json_paths.append(fp)
+            # Criar ZIP diário
+            logger("🗜️ Compactando arquivo...")
+            zip_path, md5sum = create_daily_zip(json_path, cfg.iqvia_client_id, out_dir)
+            logger(f"✅ Arquivo compactado: {zip_path.name}")
 
-        if json_paths:
-            logger("🗜️ Gerando ZIP do período...")
-            zip_path, md5sum = zip_period(json_paths, cfg.iqvia_client_id, out_dir)
-            logger(f"✅ ZIP gerado: {zip_path.name} (MD5: {md5sum})")
+            processed_count += 1
 
-            if upload:
-                logger("🌐 Autenticando na IQVIA...")
-                tok = get_token(cfg.iqvia_token_url, cfg.iqvia_client_id, cfg.iqvia_client_secret, logger=logger)
-                if not tok:
-                    logger("❌ Falha ao obter token; upload cancelado.")
-                else:
-                    logger("📤 Enviando ZIP...")
-                    resp = upload_zip(cfg.iqvia_upload_url, zip_path, tok, logger=logger)
-                    logger("✅ Retorno IQVIA: " + json.dumps(resp, ensure_ascii=False))
+            # Upload imediato se habilitado
+            if upload and token:
+                logger("📤 Enviando arquivo...")
+                try:
+                    resp = upload_zip(cfg.iqvia_upload_url, zip_path, token, logger=logger)
+                    if 'guid' in resp:
+                        logger(f"✅ Envio concluído: {resp['guid']}")
+                        save_upload_history(resp['guid'], resp, zip_path, dia, out_dir)
+                    else:
+                        logger("✅ Envio concluído")
                     
-                    # Salvar histórico de uploads
-                    try:
-                        history_dir = out_dir / "history"
-                        history_dir.mkdir(parents=True, exist_ok=True)
-                        
-                        history_file = history_dir / "upload_history.json"
-                        
-                        # Carregar histórico existente
-                        history = {}
-                        if history_file.exists():
-                            try:
-                                history = json.loads(history_file.read_text(encoding="utf-8"))
-                            except Exception:
-                                pass
-                        
-                        # Adicionar novo registro
-                        if 'guid' in resp:
-                            history[resp['guid']] = {
-                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                "status": resp,
-                                "file": zip_path.name,
-                                "period": f"{d0.strftime('%d/%m/%Y')} a {d1.strftime('%d/%m/%Y')}"
-                            }
-                            
-                            # Salvar histórico
-                            history_file.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
-                            logger(f"📝 Histórico de upload salvo: guid={resp['guid']}")
-                    except Exception as e:
-                        logger(f"⚠️ Erro ao salvar histórico: {str(e)}")
-        else:
-            logger("⚠️ Nenhum arquivo JSON foi gerado.")
+                    uploaded_count += 1
+                    
+                except Exception as e:
+                    logger(f"❌ Erro no envio: {str(e)}")
+                    logger("⏭️ Continuando processamento...")
+            
+            logger(f"✔️ Processamento concluído")
 
-        logger("✔️ Período concluído.")
+        # Resumo final
+        logger(f"\n📊 Resumo do processamento:")
+        logger(f"📅 Período: {d0.strftime('%d/%m/%Y')} a {d1.strftime('%d/%m/%Y')}")
+        logger(f"✅ Arquivos processados: {processed_count}")
+        if upload:
+            logger(f"📤 Arquivos enviados: {uploaded_count}")
+            if uploaded_count < processed_count:
+                logger(f"⚠️ {processed_count - uploaded_count} arquivo(s) não enviado(s)")
+        logger("🎉 Processamento finalizado")
 
     finally:
         try:
